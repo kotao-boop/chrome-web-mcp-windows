@@ -7,6 +7,8 @@ import tempfile
 
 import pytest
 
+from typing import Any
+
 # Use a throwaway Chrome profile/lock so the in-process live test does not
 # collide with a live chrome-web-v2 server holding the default profile lock.
 _SANDBOX = tempfile.mkdtemp(prefix="cw-v2-test-")
@@ -17,8 +19,20 @@ os.environ["CW_RATE_LIMIT_DB"] = os.path.join(_SANDBOX, "rate-limit.sqlite3")
 from chrome_web_mcp import server
 
 
+# MCP's @app.list_tools() / @app.call_tool() decorators leak wrapper signatures
+# into static typing, so direct calls trip checkers even though they work at
+# runtime. These aliases document that and keep call sites clean.
+_list_tools: Any = server.list_tools
+_call_tool: Any = server.call_tool
+
+
+def run_async(awaitable):
+    """Run an async call in a sync test."""
+    return asyncio.run(awaitable)
+
+
 def test_exposes_google_search_and_fetch_url_tool_names():
-    tools = asyncio.run(server.list_tools())
+    tools = run_async(_list_tools())
     assert sorted(tool.name for tool in tools) == ["fetch_url", "google_search"]
 
 
@@ -71,7 +85,7 @@ def test_captcha_error_is_marked_for_the_mcp_client(monkeypatch):
         raise server.CaptchaRequired("Google CAPTCHA detected")
 
     monkeypatch.setattr(server, "_search_google", fake_search)
-    content = asyncio.run(server.call_tool("google_search", {"query": "test", "limit": 1}))
+    content = run_async(_call_tool("google_search", {"query": "test", "limit": 1}))
     payload = json.loads(content[0].text)
 
     assert payload == {"success": False, "error": "Google CAPTCHA detected", "captcha_required": True}
@@ -113,21 +127,21 @@ def test_call_tool_fetch_url_validates_and_delegates(monkeypatch):
         return {"url": url, "title": "Example", "text": "hello", "truncated": False}
 
     monkeypatch.setattr(server, "_fetch_page", fake_fetch)
-    content = asyncio.run(server.call_tool("fetch_url", {"url": "https://example.com", "char_limit": 500}))
-    payload = __import__("json").loads(content[0].text)
+    content = run_async(_call_tool("fetch_url", {"url": "https://example.com", "char_limit": 500}))
+    payload = json.loads(content[0].text)
     assert captured == {"url": "https://example.com", "char_limit": 500}
     assert payload["success"] is True
     assert payload["data"]["title"] == "Example"
 
 
 def test_call_tool_fetch_url_rejects_bad_args():
-    payload = __import__("json").loads(
-        asyncio.run(server.call_tool("fetch_url", {"url": ""}))[0].text
+    payload = json.loads(
+        run_async(_call_tool("fetch_url", {"url": ""}))[0].text
     )
     assert payload["success"] is False
     assert "url is required" in payload["error"]
-    payload2 = __import__("json").loads(
-        asyncio.run(server.call_tool("fetch_url", {"url": "https://example.com", "char_limit": 10}))[0].text
+    payload2 = json.loads(
+        run_async(_call_tool("fetch_url", {"url": "https://example.com", "char_limit": 10}))[0].text
     )
     assert payload2["success"] is False
 
@@ -161,8 +175,8 @@ def test_call_tool_returns_single_structured_json_layer(monkeypatch):
         return [{"title": "Hermes", "url": "https://example.com/", "description": "Agent", "position": 1}]
 
     monkeypatch.setattr(server, "_search_google", fake_search)
-    content = asyncio.run(server.call_tool("google_search", {"query": "Hermes Agent", "limit": 2}))
-    payload = __import__("json").loads(content[0].text)
+    content = run_async(_call_tool("google_search", {"query": "Hermes Agent", "limit": 2}))
+    payload = json.loads(content[0].text)
     assert payload == {
         "success": True,
         "data": {"web": [{"title": "Hermes", "url": "https://example.com/", "description": "Agent", "position": 1}]},

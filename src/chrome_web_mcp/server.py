@@ -515,31 +515,51 @@ class BrowserRuntime:
         """
         env = self._human_display_environment()
         env["DISPLAY"] = host_display
-        proc = subprocess.Popen(
-            [
-                "Xephyr",
-                "-displayfd",
-                "1",
-                "-screen",
-                "1365x900x24",
-                "-title",
-                "chrome-web-mcp",
-                "-nolisten",
-                "tcp",
-            ],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            start_new_session=True,
-        )
+        # Arm a minimize helper BEFORE Xephyr maps its window: `xdotool search
+        # --sync` blocks until the window appears, then minimizes it within
+        # milliseconds. Starting minimized this way leaves (almost) no visible
+        # flash, unlike sleep-then-minimize after the fact.
+        try:
+            minimizer = subprocess.Popen(
+                ["xdotool", "search", "--sync", "--onlyvisible", "--name", "chrome-web-mcp", "windowminimize"],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            minimizer = None
+        try:
+            proc = subprocess.Popen(
+                [
+                    "Xephyr",
+                    "-displayfd",
+                    "1",
+                    "-screen",
+                    "1365x900x24",
+                    "-title",
+                    "chrome-web-mcp",
+                    "-nolisten",
+                    "tcp",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                start_new_session=True,
+            )
+        except Exception:
+            _terminate_owned_process(minimizer, 2)
+            raise
         self.xephyr = proc
         assert proc.stdout is not None
         ready, _, _ = select.select([proc.stdout], [], [], 10)
         if not ready:
+            _terminate_owned_process(minimizer, 2)
             raise RuntimeError("Xephyr did not allocate a display within 10 seconds")
         number = proc.stdout.readline().strip()
         if not number.isdigit():
+            _terminate_owned_process(minimizer, 2)
             raise RuntimeError("Xephyr returned an invalid display number")
         display = f":{number}"
         for _ in range(30):
@@ -550,33 +570,17 @@ class BrowserRuntime:
                 timeout=2,
             )
             if check.returncode == 0:
-                self._keep_nested_window_behind()
+                if minimizer is not None:
+                    try:
+                        minimizer.wait(timeout=10)
+                    except subprocess.SubprocessError:
+                        _terminate_owned_process(minimizer, 2)
                 return display
             if proc.poll() is not None:
                 break
             time.sleep(0.1)
+        _terminate_owned_process(minimizer, 2)
         raise RuntimeError("Xephyr failed its readiness check")
-
-    @staticmethod
-    def _keep_nested_window_behind() -> None:
-        """Best-effort: start the Xephyr window minimized.
-
-        A newly mapped window is raised by the window manager by default, and
-        lowering races with the mapping, so the window kept popping to the
-        front. Minimizing is deterministic: the window sits in the dock/task
-        bar, never steals focus, and the user opens it on demand. Later
-        navigations reuse the same tab and never raise anything.
-        """
-        try:
-            time.sleep(0.5)
-            subprocess.run(
-                ["xdotool", "search", "--name", "chrome-web-mcp", "windowminimize"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=5,
-            )
-        except (OSError, subprocess.SubprocessError):
-            pass
 
     def _start_chrome(self, display: str) -> tuple[int, str]:
         PROFILE_DIR.mkdir(parents=True, exist_ok=True)
@@ -814,6 +818,41 @@ _EXTRACT_RESULTS_JS = r"""(() => {
 })()"""
 
 
+async def _ensure_reused_tab(browser: Any, which: str) -> Any:
+    """Return a connected page socket for a long-lived search/fetch tab.
+
+    Reuses the existing target when it is still alive, otherwise creates a
+    background tab. Both search and fetch share this so their target handling
+    cannot drift apart.
+    """
+    attr = "search_target_id" if which == "search" else "fetch_target_id"
+    target_id = getattr(_RUNTIME, attr)
+    if target_id:
+        try:
+            alive = await _cdp_call(
+                browser, "Target.getTargetInfo", {"targetId": target_id}
+            )
+            if not alive.get("targetInfo", {}).get("targetId"):
+                target_id = None
+        except Exception:
+            target_id = None
+    if not target_id:
+        created = await _cdp_call(
+            browser,
+            "Target.createTarget",
+            {"url": "about:blank", "background": True, "newWindow": False},
+        )
+        target_id = created.get("targetId")
+        if not target_id or _RUNTIME.port is None:
+            raise RuntimeError(f"Chrome did not create a {which} tab")
+        setattr(_RUNTIME, attr, target_id)
+    port = _RUNTIME.port
+    return await websockets.connect(
+        f"ws://127.0.0.1:{port}/devtools/page/{target_id}",
+        max_size=MAX_CDP_MESSAGE,
+    )
+
+
 async def _ensure_search_page(browser: Any) -> tuple[Any, str, bool]:
     """Return (page_ws, target_id, created) for the long-lived search tab.
 
@@ -822,39 +861,11 @@ async def _ensure_search_page(browser: Any) -> tuple[Any, str, bool]:
     ephemeral (re-connected per search), so we identify the target by its ID and
     simply verify it is still alive before reconnecting the page socket.
     """
-    # Reuse the existing target if it is still alive in this browser session.
-    if _RUNTIME.search_target_id:
-        try:
-            alive = await _cdp_call(
-                browser, "Target.getTargetInfo", {"targetId": _RUNTIME.search_target_id}
-            )
-            if alive.get("targetInfo", {}).get("targetId"):
-                port = _RUNTIME.port
-                if port:
-                    page = await websockets.connect(
-                        f"ws://127.0.0.1:{port}/devtools/page/{_RUNTIME.search_target_id}",
-                        max_size=MAX_CDP_MESSAGE,
-                    )
-                    return page, _RUNTIME.search_target_id, False
-        except Exception:
-            pass
-        _RUNTIME.search_target_id = None
-    # No usable target: create one (background tab, not a new window).
-    created = await _cdp_call(
-        browser,
-        "Target.createTarget",
-        {"url": "about:blank", "background": True, "newWindow": False},
-    )
-    target_id = created.get("targetId")
-    if not target_id or _RUNTIME.port is None:
-        raise RuntimeError("Chrome did not create a search tab")
-    _RUNTIME.search_target_id = target_id
-    port = _RUNTIME.port
-    page = await websockets.connect(
-        f"ws://127.0.0.1:{port}/devtools/page/{target_id}",
-        max_size=MAX_CDP_MESSAGE,
-    )
-    return page, target_id, True
+    previous = _RUNTIME.search_target_id
+    page = await _ensure_reused_tab(browser, "search")
+    current = _RUNTIME.search_target_id
+    assert current is not None
+    return page, current, previous != current
 
 
 async def _extract_google_candidates(query: str, limit: int) -> list[dict]:
@@ -973,29 +984,7 @@ async def _fetch_page(url: str, char_limit: int) -> dict:
         browser = await websockets.connect(browser_ws, max_size=MAX_CDP_MESSAGE)
         page: Any = None
         try:
-            # Reuse or create a dedicated fetch tab.
-            if _RUNTIME.fetch_target_id:
-                try:
-                    alive = await _cdp_call(
-                        browser, "Target.getTargetInfo", {"targetId": _RUNTIME.fetch_target_id}
-                    )
-                    if not alive.get("targetInfo", {}).get("targetId"):
-                        _RUNTIME.fetch_target_id = None
-                except Exception:
-                    _RUNTIME.fetch_target_id = None
-            if not _RUNTIME.fetch_target_id:
-                created = await _cdp_call(
-                    browser,
-                    "Target.createTarget",
-                    {"url": "about:blank", "background": True, "newWindow": False},
-                )
-                _RUNTIME.fetch_target_id = created.get("targetId")
-                if not _RUNTIME.fetch_target_id or _RUNTIME.port is None:
-                    raise RuntimeError("Chrome did not create a fetch tab")
-            page = await websockets.connect(
-                f"ws://127.0.0.1:{_RUNTIME.port}/devtools/page/{_RUNTIME.fetch_target_id}",
-                max_size=MAX_CDP_MESSAGE,
-            )
+            page = await _ensure_reused_tab(browser, "fetch")
             await _cdp_call(page, "Page.enable")
             await _cdp_call(page, "Runtime.enable")
             await _cdp_call(page, "Page.navigate", {"url": validated})
