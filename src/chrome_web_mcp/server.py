@@ -64,6 +64,31 @@ _BLOCKED_HOSTS = {"localhost", "metadata.google.internal", "metadata.goog"}
 _CDP_IDS = itertools.count(1)
 
 
+class CaptchaRequired(RuntimeError):
+    """The Google page requires a human interaction before search can continue."""
+
+
+def _is_google_challenge(url: str, text: str) -> bool:
+    """Detect Google's challenge page without treating ordinary result text as one."""
+    parsed = urllib.parse.urlparse(url)
+    if not _is_google_host(parsed.hostname):
+        return False
+    path = parsed.path.lower()
+    if path == "/sorry" or path.startswith("/sorry/"):
+        return True
+    normalized = " ".join(text.lower().split())
+    return any(
+        phrase in normalized
+        for phrase in (
+            "our systems have detected unusual traffic",
+            "unusual traffic from your computer network",
+            "automated queries",
+            "not a robot",
+            "captcha",
+        )
+    )
+
+
 def _is_google_host(host: str | None) -> bool:
     normalized = (host or "").lower().rstrip(".")
     return normalized == "google.com" or normalized.endswith(".google.com")
@@ -199,6 +224,9 @@ class BrowserRuntime:
         self.display: str | None = None
         self.port: int | None = None
         self.browser_ws: str | None = None
+        self.xpra_server: subprocess.Popen | None = None
+        self.xpra_client: subprocess.Popen | None = None
+        self.user_display = os.environ.get("DISPLAY")
         # A long-lived background search tab, reused across queries so we do not
         # repeatedly open/close targets (which looks like bot activity to Google).
         self.search_target_id: str | None = None
@@ -229,6 +257,91 @@ class BrowserRuntime:
         for key in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
             env.pop(key, None)
         return env
+
+    def _human_display_environment(self) -> dict[str, str]:
+        """Prepare an X11 client environment for the user's desktop display."""
+        env = os.environ.copy()
+        env["DISPLAY"] = self.user_display or ""
+        env["XDG_SESSION_TYPE"] = "x11"
+        for key in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
+            env.pop(key, None)
+        return env
+
+    def hide_for_human(self) -> None:
+        """Stop the temporary Xpra shadow server and its visible client."""
+        _terminate_owned_process(self.xpra_client, 3)
+        _terminate_owned_process(self.xpra_server, 3)
+        self.xpra_client = None
+        self.xpra_server = None
+
+    def expose_for_human(self) -> None:
+        """Attach the private Xvfb display to the user's desktop via Xpra."""
+        if not self.display:
+            raise RuntimeError("CAPTCHA browser display is not ready")
+        if not self.user_display:
+            raise RuntimeError("CAPTCHA display is unavailable: user DISPLAY is not set")
+        if self.xpra_client and self.xpra_client.poll() is None:
+            return
+        xpra = shutil.which("xpra")
+        if not xpra:
+            raise RuntimeError("Xpra is not installed; install the xpra package to solve CAPTCHA")
+        self.hide_for_human()
+        server_env = self._browser_environment(self.display)
+        self.xpra_server = subprocess.Popen(
+            [
+                xpra,
+                "shadow",
+                self.display,
+                "--daemon=no",
+                "--mdns=no",
+                "--notifications=no",
+                "--bell=no",
+                "--system-tray=no",
+            ],
+            env=server_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        client_env = self._human_display_environment()
+        ready = False
+        for _ in range(40):
+            if self.xpra_server.poll() is not None:
+                break
+            status = subprocess.run(
+                [xpra, "list"],
+                env=client_env,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if self.display in status.stdout:
+                ready = True
+                break
+            time.sleep(0.25)
+        if not ready:
+            self.hide_for_human()
+            raise RuntimeError("Xpra shadow session did not become ready")
+        self.xpra_client = subprocess.Popen(
+            [
+                xpra,
+                "attach",
+                self.display,
+                "--opengl=no",
+                "--clipboard=no",
+                "--notifications=no",
+                "--bell=no",
+                "--system-tray=no",
+            ],
+            env=client_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        time.sleep(0.25)
+        if self.xpra_client.poll() is not None:
+            self.hide_for_human()
+            raise RuntimeError("Xpra attach client exited before showing the browser")
 
     @staticmethod
     def _chrome_executable() -> str:
@@ -444,6 +557,7 @@ class BrowserRuntime:
             raise
 
     def cleanup(self) -> None:
+        self.hide_for_human()
         _terminate_owned_process(self.chrome, 5)
         _terminate_owned_process(self.xvfb, 3)
         self.chrome = None
@@ -684,6 +798,14 @@ async def _extract_google_candidates(query: str, limit: int) -> list[dict]:
         final_url = str(await _evaluate(page, "location.href"))
         if not _is_google_host(urllib.parse.urlparse(final_url).hostname):
             raise RuntimeError("Google navigation left the allowed origin")
+        body_text = str(await _evaluate(page, "document.body?.innerText || ''"))
+        if _is_google_challenge(final_url, body_text):
+            try:
+                await asyncio.to_thread(_RUNTIME.expose_for_human)
+                detail = "Xpra has shown the CAPTCHA browser window; solve it, then retry the same search."
+            except Exception as exc:
+                detail = f"CAPTCHA detected, but the browser could not be shown: {exc}"
+            raise CaptchaRequired(detail)
         raw = await _evaluate(page, _EXTRACT_RESULTS_JS)
         candidates = json.loads(raw or "[]")
         if not isinstance(candidates, list):
@@ -709,6 +831,7 @@ async def _search_google(query: str, limit: int) -> list[dict]:
     results = await _build_results(candidates, limit, resolve_url=_resolve_candidate_url)
     if not results:
         raise RuntimeError("Google rendered no usable external search results")
+    await asyncio.to_thread(_RUNTIME.hide_for_human)
     return results
 
 
@@ -869,6 +992,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             payload = {"success": True, "data": await _fetch_page(url.strip(), char_limit)}
         else:
             raise ValueError(f"Unknown tool: {name}")
+    except CaptchaRequired as exc:
+        payload = {"success": False, "error": str(exc), "captcha_required": True}
     except Exception as exc:
         payload = {"success": False, "error": str(exc)}
     return [types.TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]

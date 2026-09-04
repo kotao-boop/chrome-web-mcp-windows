@@ -13,6 +13,7 @@ stdio command. It does not depend on Hermes Agent.
 - Python 3.10 or newer
 - Google Chrome, Google Chrome for Testing, or Chromium
 - `Xvfb` on Linux
+- `xpra` on Linux if interactive CAPTCHA recovery is desired
 
 The Python dependencies are installed with the package. Chrome and Xvfb remain
 host prerequisites because they are external browser processes.
@@ -22,7 +23,7 @@ host prerequisites because they are external browser processes.
 From a built wheel:
 
 ```bash
-python -m pip install chrome_web_mcp-0.1.0-py3-none-any.whl
+python -m pip install chrome_web_mcp-0.2.0-py3-none-any.whl
 chrome-web-mcp
 ```
 
@@ -33,7 +34,7 @@ For a published package, an MCP client can let `uvx` install it on demand:
   "mcpServers": {
     "chrome-web": {
       "command": "uvx",
-      "args": ["--from", "chrome-web-mcp==0.1.0", "chrome-web-mcp"]
+      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
     }
   }
 }
@@ -131,6 +132,13 @@ through this Google-search queue.
 This package does not bypass authentication or CAPTCHA challenges. It is a
 browser-backed search/fetch MCP server, not a general remote browser-control
 API.
+
+When Google presents a CAPTCHA during `google_search`, the server returns
+`captcha_required: true` and temporarily exposes the current Xvfb display
+through Xpra on the user's desktop. Solve the challenge in that window, then
+retry the same search. A successful retry detaches Xpra and returns to the
+invisible Xvfb display. If no user `DISPLAY` or Xpra installation is available,
+the tool returns an explicit exposure error instead.
 
 ## Development and verification
 

@@ -48,6 +48,62 @@ def test_shared_rate_limiter_reserves_slots_across_processes(tmp_path):
     assert slots[1] - slots[0] >= 0.9
 
 
+def test_google_challenge_is_detected_from_url_or_rendered_text():
+    assert server._is_google_challenge("https://www.google.com/sorry/index", "")
+    assert server._is_google_challenge("https://www.google.com/search?q=x", "Our systems have detected unusual traffic")
+    assert not server._is_google_challenge("https://www.google.com/search?q=x", "Normal search results")
+
+
+def test_human_display_environment_uses_real_x11_display(monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+
+    env = server.BrowserRuntime()._human_display_environment()
+
+    assert env["DISPLAY"] == ":0"
+    assert env["XDG_SESSION_TYPE"] == "x11"
+    assert "WAYLAND_DISPLAY" not in env
+
+
+def test_captcha_error_is_marked_for_the_mcp_client(monkeypatch):
+    async def fake_search(query, limit):
+        raise server.CaptchaRequired("Google CAPTCHA detected")
+
+    monkeypatch.setattr(server, "_search_google", fake_search)
+    content = asyncio.run(server.call_tool("google_search", {"query": "test", "limit": 1}))
+    payload = json.loads(content[0].text)
+
+    assert payload == {"success": False, "error": "Google CAPTCHA detected", "captcha_required": True}
+
+
+def test_expose_for_human_starts_shadow_and_attach(monkeypatch):
+    calls = []
+
+    class FakeProcess:
+        pid = 12345
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(server.shutil, "which", lambda name: "/usr/bin/xpra")
+    monkeypatch.setattr(server.subprocess, "Popen", lambda command, **kwargs: calls.append((command, kwargs)) or FakeProcess())
+    monkeypatch.setattr(
+        server.subprocess,
+        "run",
+        lambda command, **kwargs: type("Result", (), {"stdout": "LIVE session at :77"})(),
+    )
+    runtime = server.BrowserRuntime()
+    runtime.display = ":77"
+    runtime.user_display = ":0"
+
+    runtime.expose_for_human()
+
+    assert calls[0][0][:3] == ["/usr/bin/xpra", "shadow", ":77"]
+    assert calls[1][0][:3] == ["/usr/bin/xpra", "attach", ":77"]
+    assert calls[1][1]["env"]["DISPLAY"] == ":0"
+
+
 def test_call_tool_fetch_url_validates_and_delegates(monkeypatch):
     captured = {}
 
