@@ -597,6 +597,7 @@ class BrowserRuntime:
             "--disable-sync",
             "--password-store=basic",
             "--disable-gpu",
+            "--disable-dev-shm-usage",
             "--mute-audio",
             "--disable-blink-features=AutomationControlled",
             "--lang=ja-JP",

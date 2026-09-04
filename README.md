@@ -71,6 +71,35 @@ For a wheel installation, use the Python interpreter from the environment
 where the wheel was installed. MCP clients should launch the process over
 stdio and must not add shell-specific quoting around the arguments.
 
+## Docker
+
+The image bundles Python, dependencies, Chromium, Xvfb (plus Xephyr/xdotool
+for visible-window mode), so users only need Docker:
+
+```bash
+docker build -t chrome-web-mcp .
+```
+
+```json
+{
+  "mcpServers": {
+    "chrome-web": {
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "chrome-web-mcp"]
+    }
+  }
+}
+```
+
+Visible-window mode needs the host X socket (Linux with X11):
+
+```bash
+docker run -i --rm -e DISPLAY=$DISPLAY -e CW_DISPLAY_MODE=xephyr \
+  -v /tmp/.X11-unix:/tmp/.X11-unix chrome-web-mcp
+```
+
+Image size is about 1.4 GB (mostly Chromium and fonts).
+
 ## Tools
 
 ### `google_search`
