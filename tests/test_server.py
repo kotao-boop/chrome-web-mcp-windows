@@ -187,6 +187,77 @@ def test_build_results_deduplicates_and_honors_limit():
     ]
 
 
+def test_fetch_page_serializes_concurrent_calls(monkeypatch):
+    assert isinstance(server._FETCH_LOCK, asyncio.Lock)
+    navigated = []
+    in_section = {"active": 0, "max": 0}
+
+    async def fake_ensure():
+        return "ws://127.0.0.1:1/devtools/browser/x"
+
+    class FakeConn:
+        async def send(self, msg):
+            pass
+
+        async def recv(self):
+            return '{"id": 1, "result": {}}'
+
+        async def close(self):
+            pass
+
+    async def fake_connect(*args, **kwargs):
+        return FakeConn()
+
+    async def fake_cdp(conn, method, params=None):
+        if method == "Target.getTargetInfo":
+            return {"targetInfo": {"targetId": "fetch-tab"}}
+        if method == "Target.createTarget":
+            return {"targetId": "fetch-tab"}
+        if method == "Page.navigate":
+            url = (params or {}).get("url", "")
+            navigated.append(url)
+            in_section["active"] += 1
+            in_section["max"] = max(in_section["max"], in_section["active"])
+            await asyncio.sleep(0.05)
+            in_section["active"] -= 1
+            return {}
+        return {}
+
+    async def fake_evaluate(conn, expr):
+        if "location.href" in expr:
+            return navigated[-1] if navigated else "https://example.com/"
+        return '{"title": "t", "text": "hello"}'
+
+    async def fake_wait(conn):
+        await asyncio.sleep(0.02)
+
+    monkeypatch.setattr(server, "_RUNTIME", server.BrowserRuntime())
+    server._RUNTIME.fetch_target_id = "fetch-tab"
+    server._RUNTIME.port = 1
+    async def fake_to_thread(fn, *a, **k):
+        res = fn(*a, **k)
+        if asyncio.iscoroutine(res):
+            return await res
+        return res
+    monkeypatch.setattr(server.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(server._RUNTIME, "ensure", fake_ensure)
+    monkeypatch.setattr(server.websockets, "connect", fake_connect)
+    monkeypatch.setattr(server, "_cdp_call", fake_cdp)
+    monkeypatch.setattr(server, "_evaluate", fake_evaluate)
+    monkeypatch.setattr(server, "_wait_ready", fake_wait)
+    monkeypatch.setattr(server, "_validate_public_url", lambda u: u)
+
+    async def run_two():
+        return await asyncio.gather(
+            server._fetch_page("https://one.example/a", 500),
+            server._fetch_page("https://two.example/b", 500),
+        )
+
+    first, second = asyncio.run(run_two())
+    assert {first["url"], second["url"]} == {"https://one.example/a", "https://two.example/b"}
+    assert in_section["max"] == 1
+
+
 def test_live_google_search_returns_real_external_results():
     results = asyncio.run(server._search_google("Hermes Agent Nous Research", 3))
     assert len(results) == 3

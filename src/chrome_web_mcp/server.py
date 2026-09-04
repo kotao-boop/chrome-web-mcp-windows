@@ -638,6 +638,11 @@ BrowserRuntime._sweep_orphans()
 # Serialize searches within this process and reserve a shared inter-process slot.
 _SEARCH_LOCK = asyncio.Lock()
 _SEARCH_LIMITER = SharedSearchRateLimiter()
+# Serialize fetches within this process: _fetch_page reuses a single long-lived
+# fetch tab (separate from the search tab), so two concurrent fetches would
+# navigate the SAME target and the second URL overwrites the first before the
+# first read happens (both callers then return the winner's content).
+_FETCH_LOCK = asyncio.Lock()
 
 
 async def _cdp_call(connection: Any, method: str, params: dict | None = None) -> dict:
@@ -857,58 +862,59 @@ async def _fetch_page(url: str, char_limit: int) -> dict:
     """
     # Validate the requested URL up front (fail-closed).
     validated = _validate_public_url(url)
-    browser_ws = await asyncio.to_thread(_RUNTIME.ensure)
-    browser = await websockets.connect(browser_ws, max_size=MAX_CDP_MESSAGE)
-    page: Any = None
-    try:
-        # Reuse or create a dedicated fetch tab.
-        if _RUNTIME.fetch_target_id:
-            try:
-                alive = await _cdp_call(
-                    browser, "Target.getTargetInfo", {"targetId": _RUNTIME.fetch_target_id}
-                )
-                if not alive.get("targetInfo", {}).get("targetId"):
+    async with _FETCH_LOCK:
+        browser_ws = await asyncio.to_thread(_RUNTIME.ensure)
+        browser = await websockets.connect(browser_ws, max_size=MAX_CDP_MESSAGE)
+        page: Any = None
+        try:
+            # Reuse or create a dedicated fetch tab.
+            if _RUNTIME.fetch_target_id:
+                try:
+                    alive = await _cdp_call(
+                        browser, "Target.getTargetInfo", {"targetId": _RUNTIME.fetch_target_id}
+                    )
+                    if not alive.get("targetInfo", {}).get("targetId"):
+                        _RUNTIME.fetch_target_id = None
+                except Exception:
                     _RUNTIME.fetch_target_id = None
-            except Exception:
-                _RUNTIME.fetch_target_id = None
-        if not _RUNTIME.fetch_target_id:
-            created = await _cdp_call(
-                browser,
-                "Target.createTarget",
-                {"url": "about:blank", "background": True, "newWindow": False},
+            if not _RUNTIME.fetch_target_id:
+                created = await _cdp_call(
+                    browser,
+                    "Target.createTarget",
+                    {"url": "about:blank", "background": True, "newWindow": False},
+                )
+                _RUNTIME.fetch_target_id = created.get("targetId")
+                if not _RUNTIME.fetch_target_id or _RUNTIME.port is None:
+                    raise RuntimeError("Chrome did not create a fetch tab")
+            page = await websockets.connect(
+                f"ws://127.0.0.1:{_RUNTIME.port}/devtools/page/{_RUNTIME.fetch_target_id}",
+                max_size=MAX_CDP_MESSAGE,
             )
-            _RUNTIME.fetch_target_id = created.get("targetId")
-            if not _RUNTIME.fetch_target_id or _RUNTIME.port is None:
-                raise RuntimeError("Chrome did not create a fetch tab")
-        page = await websockets.connect(
-            f"ws://127.0.0.1:{_RUNTIME.port}/devtools/page/{_RUNTIME.fetch_target_id}",
-            max_size=MAX_CDP_MESSAGE,
-        )
-        await _cdp_call(page, "Page.enable")
-        await _cdp_call(page, "Runtime.enable")
-        await _cdp_call(page, "Page.navigate", {"url": validated})
-        await _wait_ready(page)
-        # Re-validate the final URL after redirects (catch public->local SSRF).
-        final_url = str(await _evaluate(page, "location.href"))
-        _validate_public_url(final_url)
-        raw = await _evaluate(page, _FETCH_TEXT_JS)
-        data = json.loads(raw or "{}")
-        text = " ".join(str(data.get("text", "")).split())
-        title = " ".join(str(data.get("title", "")).split())
-        truncated = len(text) > char_limit
-        return {
-            "url": final_url,
-            "title": title[:300],
-            "text": text[:char_limit],
-            "truncated": truncated,
-        }
-    finally:
-        if page is not None:
-            try:
-                await page.close()
-            except Exception:
-                pass
-        await browser.close()
+            await _cdp_call(page, "Page.enable")
+            await _cdp_call(page, "Runtime.enable")
+            await _cdp_call(page, "Page.navigate", {"url": validated})
+            await _wait_ready(page)
+            # Re-validate the final URL after redirects (catch public->local SSRF).
+            final_url = str(await _evaluate(page, "location.href"))
+            _validate_public_url(final_url)
+            raw = await _evaluate(page, _FETCH_TEXT_JS)
+            data = json.loads(raw or "{}")
+            text = " ".join(str(data.get("text", "")).split())
+            title = " ".join(str(data.get("title", "")).split())
+            truncated = len(text) > char_limit
+            return {
+                "url": final_url,
+                "title": title[:300],
+                "text": text[:char_limit],
+                "truncated": truncated,
+            }
+        finally:
+            if page is not None:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+            await browser.close()
 
 
 @app.list_tools()
