@@ -219,6 +219,7 @@ class BrowserRuntime:
 
     def __init__(self) -> None:
         self.xvfb: subprocess.Popen | None = None
+        self.xephyr: subprocess.Popen | None = None
         self.chrome: subprocess.Popen | None = None
         self.lock_file: Any = None
         self.display: str | None = None
@@ -227,6 +228,12 @@ class BrowserRuntime:
         self.xpra_server: subprocess.Popen | None = None
         self.xpra_client: subprocess.Popen | None = None
         self.user_display = os.environ.get("DISPLAY")
+        # CW_DISPLAY_MODE=xvfb (default): Chrome on a private Xvfb display,
+        # fully hidden, never steals focus.
+        # CW_DISPLAY_MODE=xephyr: Chrome on a nested Xephyr window living on
+        # the user's desktop. The user can see/minimize it, but Chrome inside
+        # can never pop a window to the front outside of it.
+        self.display_mode = os.environ.get("CW_DISPLAY_MODE", "xvfb").strip().lower()
         # A long-lived background search tab, reused across queries so we do not
         # repeatedly open/close targets (which looks like bot activity to Google).
         self.search_target_id: str | None = None
@@ -498,6 +505,79 @@ class BrowserRuntime:
             time.sleep(0.1)
         raise RuntimeError("Xvfb failed its readiness check")
 
+    def _start_xephyr(self, host_display: str) -> str:
+        """Start a nested Xephyr window on the user's desktop and return its display.
+
+        Xephyr is a plain X client: it appears as one ordinary window the user
+        can minimize, move to another workspace, or close. Chrome runs *inside*
+        it, so tool calls can never pop a window to the front of the desktop
+        the way running Chrome directly on DISPLAY would.
+        """
+        env = self._human_display_environment()
+        env["DISPLAY"] = host_display
+        proc = subprocess.Popen(
+            [
+                "Xephyr",
+                "-displayfd",
+                "1",
+                "-screen",
+                "1365x900x24",
+                "-title",
+                "chrome-web-mcp",
+                "-nolisten",
+                "tcp",
+            ],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            start_new_session=True,
+        )
+        self.xephyr = proc
+        assert proc.stdout is not None
+        ready, _, _ = select.select([proc.stdout], [], [], 10)
+        if not ready:
+            raise RuntimeError("Xephyr did not allocate a display within 10 seconds")
+        number = proc.stdout.readline().strip()
+        if not number.isdigit():
+            raise RuntimeError("Xephyr returned an invalid display number")
+        display = f":{number}"
+        for _ in range(30):
+            check = subprocess.run(
+                ["xdpyinfo", "-display", display],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+            if check.returncode == 0:
+                self._keep_nested_window_behind()
+                return display
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+        raise RuntimeError("Xephyr failed its readiness check")
+
+    @staticmethod
+    def _keep_nested_window_behind() -> None:
+        """Best-effort: start the Xephyr window minimized.
+
+        A newly mapped window is raised by the window manager by default, and
+        lowering races with the mapping, so the window kept popping to the
+        front. Minimizing is deterministic: the window sits in the dock/task
+        bar, never steals focus, and the user opens it on demand. Later
+        navigations reuse the same tab and never raise anything.
+        """
+        try:
+            time.sleep(0.5)
+            subprocess.run(
+                ["xdotool", "search", "--name", "chrome-web-mcp", "windowminimize"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+
     def _start_chrome(self, display: str) -> tuple[int, str]:
         PROFILE_DIR.mkdir(parents=True, exist_ok=True)
         DEVTOOLS_FILE.unlink(missing_ok=True)
@@ -549,7 +629,14 @@ class BrowserRuntime:
         self.cleanup()
         self._acquire_lock()
         try:
-            self.display = self._start_xvfb()
+            if self.display_mode == "xephyr":
+                if not self.user_display:
+                    raise RuntimeError(
+                        "CW_DISPLAY_MODE=xephyr needs a user DISPLAY, but none is set"
+                    )
+                self.display = self._start_xephyr(self.user_display)
+            else:
+                self.display = self._start_xvfb()
             self.port, self.browser_ws = self._start_chrome(self.display)
             return self.browser_ws
         except Exception:
@@ -559,8 +646,10 @@ class BrowserRuntime:
     def cleanup(self) -> None:
         self.hide_for_human()
         _terminate_owned_process(self.chrome, 5)
+        _terminate_owned_process(self.xephyr, 3)
         _terminate_owned_process(self.xvfb, 3)
         self.chrome = None
+        self.xephyr = None
         self.xvfb = None
         self.display = None
         self.port = None
@@ -805,11 +894,14 @@ async def _extract_google_candidates(query: str, limit: int) -> list[dict]:
             raise RuntimeError("Google navigation left the allowed origin")
         body_text = str(await _evaluate(page, "document.body?.innerText || ''"))
         if _is_google_challenge(final_url, body_text):
-            try:
-                await asyncio.to_thread(_RUNTIME.expose_for_human)
-                detail = "Xpra has shown the CAPTCHA browser window; solve it, then retry the same search."
-            except Exception as exc:
-                detail = f"CAPTCHA detected, but the browser could not be shown: {exc}"
+            if _xpra_expose_enabled():
+                try:
+                    await asyncio.to_thread(_RUNTIME.expose_for_human)
+                    detail = "Xpra has shown the CAPTCHA browser window; solve it, then retry the same search."
+                except Exception as exc:
+                    detail = f"CAPTCHA detected, but the browser could not be shown: {exc}"
+            else:
+                detail = _captcha_detail_for_mode()
             raise CaptchaRequired(detail)
         raw = await _evaluate(page, _EXTRACT_RESULTS_JS)
         candidates = json.loads(raw or "[]")
@@ -824,6 +916,20 @@ async def _extract_google_candidates(query: str, limit: int) -> list[dict]:
             except Exception:
                 pass
         await browser.close()
+
+
+def _xpra_expose_enabled() -> bool:
+    """Xpra auto-attach is opt-in: it once crashed the desktop session."""
+    return os.environ.get("CW_XPRA_EXPOSE", "").strip() == "1"
+
+
+def _captcha_detail_for_mode() -> str:
+    if _RUNTIME.display_mode == "xephyr":
+        return (
+            "Google CAPTCHA detected. Solve it in the chrome-web-mcp window "
+            "on your desktop, then retry the same search."
+        )
+    return "Google CAPTCHA detected. Wait a while, then retry the same search."
 
 
 async def _search_google(query: str, limit: int) -> list[dict]:

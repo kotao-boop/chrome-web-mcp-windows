@@ -108,6 +108,16 @@ Optional environment variables:
 - `CW_RATE_LIMIT_DB` — shared SQLite path for the Google-search start-slot
   queue. By default it is `/tmp/chrome-web-mcp/search-rate-limit.sqlite3`, so
   separate MCP processes of the same user share one limiter.
+- `CW_DISPLAY_MODE` — `xvfb` (default) runs Chrome on a private, fully hidden
+  display. `xephyr` runs Chrome inside a nested `Xephyr` window titled
+  `chrome-web-mcp` on your desktop: visible, minimizable, and movable, but
+  tool calls can never pop a window to the front outside of it. Requires
+  `Xephyr` (`xserver-xephyr`) and a user `DISPLAY`. Recommended when you want
+  to watch searches or solve a CAPTCHA by hand.
+- `CW_XPRA_EXPOSE` — set to `1` to re-enable automatic Xpra attach when a
+  CAPTCHA appears. Off by default: automatic attach once crashed the desktop
+  session, so the server only reports the CAPTCHA and leaves the browser
+  where it is.
 
 The default per-process profile prevents separate MCP clients from contending
 for one Chrome profile. Do not share a profile between live server processes
@@ -134,11 +144,10 @@ browser-backed search/fetch MCP server, not a general remote browser-control
 API.
 
 When Google presents a CAPTCHA during `google_search`, the server returns
-`captcha_required: true` and temporarily exposes the current Xvfb display
-through Xpra on the user's desktop. Solve the challenge in that window, then
-retry the same search. A successful retry detaches Xpra and returns to the
-invisible Xvfb display. If no user `DISPLAY` or Xpra installation is available,
-the tool returns an explicit exposure error instead.
+`captcha_required: true`. In `xephyr` display mode, solve the challenge in the
+`chrome-web-mcp` window on your desktop, then retry the same search. In the
+default `xvfb` mode, wait a while and retry. Automatic Xpra attach is disabled
+unless `CW_XPRA_EXPOSE=1` is set, because it once crashed the desktop session.
 
 ## Development and verification
 

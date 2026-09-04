@@ -258,6 +258,30 @@ def test_fetch_page_serializes_concurrent_calls(monkeypatch):
     assert in_section["max"] == 1
 
 
+def test_display_mode_defaults_to_xvfb(monkeypatch):
+    monkeypatch.delenv("CW_DISPLAY_MODE", raising=False)
+    assert server.BrowserRuntime().display_mode == "xvfb"
+
+
+def test_xephyr_mode_requires_user_display(monkeypatch):
+    monkeypatch.setenv("CW_DISPLAY_MODE", "xephyr")
+    runtime = server.BrowserRuntime()
+    runtime.user_display = None
+    try:
+        runtime.ensure()
+    except RuntimeError as exc:
+        assert "xephyr" in str(exc).lower()
+    else:
+        raise AssertionError("xephyr without DISPLAY should fail")
+
+
+def test_xpra_expose_is_opt_in(monkeypatch):
+    monkeypatch.delenv("CW_XPRA_EXPOSE", raising=False)
+    assert server._xpra_expose_enabled() is False
+    monkeypatch.setenv("CW_XPRA_EXPOSE", "1")
+    assert server._xpra_expose_enabled() is True
+
+
 def test_live_google_search_returns_real_external_results():
     results = asyncio.run(server._search_google("Hermes Agent Nous Research", 3))
     assert len(results) == 3
