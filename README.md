@@ -1,0 +1,145 @@
+# chrome-web-mcp
+
+A stdio Model Context Protocol server that exposes two focused browser tools:
+
+- `google_search` — Google search through a JavaScript-rendered Chrome instance.
+- `fetch_url` — JavaScript-rendered readable text extraction for public HTTP(S) URLs.
+
+The server is designed to be configured by any MCP client that can launch a
+stdio command. It does not depend on Hermes Agent.
+
+## Requirements
+
+- Python 3.10 or newer
+- Google Chrome, Google Chrome for Testing, or Chromium
+- `Xvfb` on Linux
+
+The Python dependencies are installed with the package. Chrome and Xvfb remain
+host prerequisites because they are external browser processes.
+
+## Install and run
+
+From a built wheel:
+
+```bash
+python -m pip install chrome_web_mcp-0.1.0-py3-none-any.whl
+chrome-web-mcp
+```
+
+For a published package, an MCP client can let `uvx` install it on demand:
+
+```json
+{
+  "mcpServers": {
+    "chrome-web": {
+      "command": "uvx",
+      "args": ["--from", "chrome-web-mcp==0.1.0", "chrome-web-mcp"]
+    }
+  }
+}
+```
+
+For a local checkout:
+
+```json
+{
+  "mcpServers": {
+    "chrome-web": {
+      "command": "uv",
+      "args": ["run", "--directory", "/absolute/path/to/chrome-web-mcp", "chrome-web-mcp"]
+    }
+  }
+}
+```
+
+The same server can be registered in Hermes with YAML:
+
+```yaml
+mcp_servers:
+  chrome-web:
+    command: /absolute/path/to/python
+    args:
+      - -m
+      - chrome_web_mcp
+    timeout: 120
+    connect_timeout: 60
+    enabled: true
+```
+
+For a wheel installation, use the Python interpreter from the environment
+where the wheel was installed. MCP clients should launch the process over
+stdio and must not add shell-specific quoting around the arguments.
+
+## Tools
+
+### `google_search`
+
+Input:
+
+```json
+{"query": "search terms", "limit": 5}
+```
+
+`limit` is an integer from 1 to 20. Results are returned as structured JSON
+with `title`, `url`, `description`, and `position` fields.
+
+### `fetch_url`
+
+Input:
+
+```json
+{"url": "https://example.com", "char_limit": 15000}
+```
+
+Only public `http://` and `https://` URLs without embedded credentials are
+accepted. Localhost, private IP ranges, metadata hosts, and non-public DNS
+resolutions are rejected. Redirect destinations are validated before they are
+used. `char_limit` is an integer from 100 to 200000.
+
+## Runtime configuration
+
+Optional environment variables:
+
+- `CW_CHROME` — explicit Chrome/Chromium executable path.
+- `CW_PROFILE_DIR` — explicit browser profile directory. By default, each
+  server process uses an isolated per-PID temporary profile.
+- `CW_LOCK_PATH` — explicit lock-file path when `CW_PROFILE_DIR` is set.
+- `CW_RATE_LIMIT_DB` — shared SQLite path for the Google-search start-slot
+  queue. By default it is `/tmp/chrome-web-mcp/search-rate-limit.sqlite3`, so
+  separate MCP processes of the same user share one limiter.
+
+The default per-process profile prevents separate MCP clients from contending
+for one Chrome profile. Do not share a profile between live server processes
+unless that is intentional.
+
+Google-search calls also reserve a slot in the shared SQLite queue. Separate
+MCP processes therefore start searches one at a time with a 1.0–2.5 second
+randomized gap. A reserved slot is not retried automatically if Google returns
+an error; the tool returns the error to the MCP client. `fetch_url` is not put
+through this Google-search queue.
+
+## Security and scope
+
+- The server exposes no arbitrary page-context JavaScript tool.
+- Fetching is fail-closed for private networks and credential-bearing URLs.
+- Each server owns and cleans up its Chrome and Xvfb process groups.
+- Chrome is explicitly forced onto the private X11/Xvfb display, even when the
+  host desktop session uses Wayland; the user desktop should not be surfaced.
+- SIGTERM and SIGINT trigger browser cleanup before exit.
+- Google result URLs are normalized and deduplicated before returning.
+
+This package does not bypass authentication or CAPTCHA challenges. It is a
+browser-backed search/fetch MCP server, not a general remote browser-control
+API.
+
+## Development and verification
+
+```bash
+python -m pip install -e '.[test]'
+pytest -q
+python -m build
+```
+
+The end-to-end tests exercise the real stdio MCP handshake, `tools/list`,
+Google search, public URL fetching, and shutdown cleanup. They require Chrome,
+Xvfb, and network access.

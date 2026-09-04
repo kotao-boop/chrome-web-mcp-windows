@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "chrome-web": {
+      "command": "chrome-web-mcp",
+      "args": []
+    }
+  }
+}
