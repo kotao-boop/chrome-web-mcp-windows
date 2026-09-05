@@ -8,6 +8,21 @@ A stdio Model Context Protocol server that exposes two focused browser tools:
 The server is designed to be configured by any MCP client that can launch a
 stdio command. It does not depend on Hermes Agent.
 
+## Features
+
+- JS-rendered Google search + public URL fetch through a real (non-headless)
+  Chrome on a private Xvfb display — harder to bot-detect than `--headless`.
+- Shaped markdown by default (`trafilatura` + `html2text`, pure-Python, no
+  extra service), with full-text fallback and follow-up link targets.
+- Language/region hints (`hl`/`gl`) for reproducible JA/EN results.
+- Parallel-safe: concurrent searches and fetches serialize only where the
+  browser lifecycle requires it; each fetch uses its own tab.
+- Fail-closed fetching: private networks, metadata hosts, and
+  credential-bearing URLs are blocked, including post-redirect targets.
+- Shared SQLite pacing for Google searches across MCP processes.
+- `health_check` for display/browser/queue/CAPTCHA observability.
+- Linux only (Xvfb/Xephyr, `fcntl`, process groups).
+
 ## Requirements
 
 - Python 3.10 or newer
@@ -46,7 +61,7 @@ python3 -m pip install -e '.'
 # or: python -m pip install chrome_web_mcp-0.2.0-py3-none-any.whl
 ```
 
-MCP handshake check (`TOOLS: ['google_search', 'fetch_url']` expected):
+MCP handshake check (`TOOLS: ['fetch_url', 'google_search', 'health_check']` expected):
 
 ```bash
 uv run python -c "
@@ -168,33 +183,69 @@ docker run -i --rm -e DISPLAY=$DISPLAY -e CW_DISPLAY_MODE=xephyr \
   -v /tmp/.X11-unix:/tmp/.X11-unix chrome-web-mcp
 ```
 
-Image size is about 1.4 GB (mostly Chromium and fonts).
+Image size is about 1.5 GB (mostly Chromium and fonts).
+
+## Install size (rough, Debian host)
+
+- Python environment (`.venv`, incl. trafilatura/html2text): ~100 MB
+- This package source: under 1 MB
+- Chromium set: ~485 MB
+- Xvfb + x11-utils: ~5 MB
+- Total: ~600 MB, dominated by Chromium. No new system packages were added
+  for markdown shaping (pure-Python dependencies only).
 
 ## Tools
+
+Workflow: first `google_search`, then `fetch_url` on interesting result URLs
+for full text. `health_check` reports server state without starting a browser.
 
 ### `google_search`
 
 Input:
 
 ```json
-{"query": "search terms", "limit": 5}
+{"query": "search terms", "limit": 5, "hl": "ja", "gl": "jp"}
 ```
 
 `limit` is an integer from 1 to 20. Results are returned as structured JSON
-with `title`, `url`, `description`, and `position` fields.
+with `title`, `url`, `description`, and `position` fields, plus `waited_ms`
+(the shared rate-limiter queue wait). `hl`/`gl` are optional Google language
+(`ja`/`en`) and region (`jp`/`us`) hints; defaults preserve Japanese results.
+`query` is required, max 512 chars. Searches run one at a time per process
+and are paced across processes (see Runtime configuration).
 
 ### `fetch_url`
 
 Input:
 
 ```json
-{"url": "https://example.com", "char_limit": 15000}
+{"url": "https://example.com", "char_limit": 15000, "format": "markdown"}
 ```
 
 Only public `http://` and `https://` URLs without embedded credentials are
 accepted. Localhost, private IP ranges, metadata hosts, and non-public DNS
 resolutions are rejected. Redirect destinations are validated before they are
-used. `char_limit` is an integer from 100 to 200000.
+used. `char_limit` is an integer from 100 to 200000. Text is cut at a
+sentence boundary when possible. Returns `requested_url`, `final_url`,
+`redirected`, `total_chars`, and `truncated` alongside `title` and content
+(`url` mirrors `final_url` for compatibility). `format` defaults to
+`markdown`: shaped readable markdown with boilerplate removed
+(`trafilatura`, `html2text` fallback). The response reports `formatted: true`
+and the `extraction` method, so agents can tell it was shaped — if content
+looks missing, retry with `format: "text"` for the full rendered text.
+`format: "links"` adds follow-up link targets. Concurrent fetches are
+parallel-safe; each uses its own tab. `url` is required, max 2048 chars.
+Failures return `{"success": false, "error": "..."}` (plus
+`"captcha_required": true` for Google challenges). This shaping reuses the same
+`trafilatura` + `html2text` approach as a self-hosted jina-compatible Reader,
+without needing the extra service.
+
+### `health_check`
+
+Input: `{}` (no arguments).
+
+Returns `display_mode`, browser/process liveness, the rate-limiter queue wait,
+its `min`/`max` delays, and the last CAPTCHA time.
 
 ## Runtime configuration
 
@@ -207,6 +258,8 @@ Optional environment variables:
 - `CW_RATE_LIMIT_DB` — shared SQLite path for the Google-search start-slot
   queue. By default it is `/tmp/chrome-web-mcp/search-rate-limit.sqlite3`, so
   separate MCP processes of the same user share one limiter.
+- `CW_MIN_DELAY` / `CW_MAX_DELAY` — randomized gap (seconds) between Google
+  search starts. Defaults `1.0` / `2.5`.
 - `CW_DISPLAY_MODE` — `xvfb` (default) runs Chrome on a private, fully hidden
   display. `xephyr` runs Chrome inside a nested `Xephyr` window titled
   `chrome-web-mcp` on your desktop: visible, minimizable, and movable, but
