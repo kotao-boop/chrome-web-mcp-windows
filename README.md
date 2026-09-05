@@ -21,6 +21,14 @@ host prerequisites because they are external browser processes.
 Non-headless Chrome on Xvfb is intentional: `--headless` is easier to
 bot-detect, so Xvfb is kept as a requirement even though it is heavier.
 
+## Platform support
+
+Linux only. Windows and macOS are not supported: this server depends on
+`Xvfb`/`Xephyr`, Chromium with `--ozone-platform=x11`, `fcntl.flock`, and
+process-group signaling (`killpg`), none of which work as-is on Windows.
+A Windows/macOS port would need headless Chrome plus a different locking
+scheme. Docker helps only on a Linux host with an X server for `xephyr` mode.
+
 ## Linux quickstart (Debian/Ubuntu, copy-paste)
 
 ```bash
