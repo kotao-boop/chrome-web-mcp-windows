@@ -295,6 +295,7 @@ def test_fetch_page_runs_concurrent_calls_on_separate_tabs(monkeypatch):
     monkeypatch.setattr(server.websockets, "connect", fake_connect)
     monkeypatch.setattr(server, "_cdp_call", fake_cdp)
     monkeypatch.setattr(server, "_evaluate", fake_evaluate)
+    monkeypatch.setattr(server, "_read_page_string", fake_evaluate)
     monkeypatch.setattr(server, "_wait_ready", fake_wait)
     monkeypatch.setattr(server, "_validate_public_url", lambda u: u)
 
@@ -336,8 +337,14 @@ def test_xpra_expose_is_opt_in(monkeypatch):
     assert server._xpra_expose_enabled() is True
 
 
+@pytest.mark.live
 def test_live_google_search_returns_real_external_results():
-    results, waited_ms = asyncio.run(server._search_google("Hermes Agent Nous Research", 3))
+    try:
+        results, waited_ms = asyncio.run(server._search_google("Hermes Agent Nous Research", 3))
+    except server.CaptchaRequired:
+        pytest.skip("Google requires human CAPTCHA; challenge handling is tested separately")
+    finally:
+        server._RUNTIME.cleanup()
     assert isinstance(waited_ms, float)
     assert len(results) == 3
     assert [item["position"] for item in results] == [1, 2, 3]
@@ -374,7 +381,8 @@ def test_call_tool_fetch_url_rejects_bad_format():
     assert "format" in payload["error"]
 
 
-def test_health_check_reports_status():
+def test_health_check_reports_status(monkeypatch):
+    monkeypatch.setattr(server, "_LAST_CAPTCHA_TS", None)
     payload = json.loads(run_async(_call_tool("health_check", {}))[0].text)
     assert payload["success"] is True
     data = payload["data"]

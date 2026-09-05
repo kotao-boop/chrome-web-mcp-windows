@@ -1,5 +1,5 @@
 {
-  "venvPath": "/home/ryu/chrome-web-mcp",
+  "venvPath": ".",
   "venv": ".venv",
   "typeCheckingMode": "basic"
 }

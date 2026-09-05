@@ -10,9 +10,11 @@ Run: .venv/bin/pytest tests/test_mcp_e2e.py -v
 
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -44,6 +46,23 @@ class McpClient:
             env=ENV,
         )
         self._id = 0
+        self._lines = queue.Queue()
+        def read_lines():
+            for line in self.proc.stdout:
+                self._lines.put(line)
+            self._lines.put(None)
+        threading.Thread(target=read_lines, daemon=True).start()
+
+    def close(self):
+        if self.proc.poll() is None:
+            self.proc.send_signal(signal.SIGTERM)
+            try:
+                self.proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait(timeout=5)
+        for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
+            stream.close()
 
     def send(self, method, params=None, notify=False):
         msg = {"jsonrpc": "2.0", "method": method, "params": params or {}}
@@ -54,10 +73,13 @@ class McpClient:
         self.proc.stdin.flush()
         return msg
 
-    def _next(self):
-        line = self.proc.stdout.readline()
+    def _next(self, timeout):
+        try:
+            line = self._lines.get(timeout=timeout)
+        except queue.Empty as exc:
+            raise TimeoutError("MCP response timed out") from exc
         if not line:
-            raise RuntimeError(f"server closed stdout: {self.proc.stderr.read()[:300]}")
+            raise RuntimeError("server closed stdout")
         return json.loads(line)
 
     def rpc(self, method, params=None, timeout=120):
@@ -65,7 +87,7 @@ class McpClient:
         want_id = want["id"]
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            msg = self._next()
+            msg = self._next(max(0.001, deadline - time.monotonic()))
             if msg.get("id") == want_id:
                 if "error" in msg:
                     raise RuntimeError(f"{method} error: {msg['error']}")
@@ -100,8 +122,17 @@ def find_orphans():
     return out
 
 
-def test_sigterm_idle_exits_fast():
+@pytest.fixture
+def client():
     c = McpClient()
+    try:
+        yield c
+    finally:
+        c.close()
+
+
+def test_sigterm_idle_exits_fast(client):
+    c = client
     c.handshake()
     t0 = time.monotonic()
     c.proc.send_signal(signal.SIGTERM)
@@ -113,14 +144,17 @@ def test_sigterm_idle_exits_fast():
     assert find_orphans() == []
 
 
-def test_sigterm_with_browser_exits_fast_and_no_orphans():
-    c = McpClient()
+@pytest.mark.live
+def test_sigterm_with_browser_exits_fast_and_no_orphans(client):
+    c = client
     c.handshake()
     tools = c.rpc("tools/list")
     names = sorted(t["name"] for t in tools["tools"])
     assert names == ["fetch_url", "google_search", "health_check"]
     res = c.rpc("tools/call", {"name": "google_search", "arguments": {"query": "Hermes Agent", "limit": 2}})
     payload = json.loads(res["content"][0]["text"])
+    if payload.get("captcha_required"):
+        pytest.skip("Google requires human CAPTCHA; fixture still cleans up the server")
     assert payload["success"] is True
     assert len(payload["data"]["web"]) == 2
     # fetch_url: render a public page and expect readable text + final URL.
@@ -128,7 +162,11 @@ def test_sigterm_with_browser_exits_fast_and_no_orphans():
     payload2 = json.loads(res2["content"][0]["text"])
     assert payload2["success"] is True, payload2
     assert payload2["data"]["title"], "expected a page title"
-    assert len(payload2["data"]["text"]) > 20, "expected non-trivial rendered text"
+    assert len(payload2["data"]["markdown"]) > 20, "expected non-trivial rendered markdown"
+    plain = c.rpc("tools/call", {"name": "fetch_url", "arguments": {"url": "https://example.com", "format": "text"}})
+    plain_payload = json.loads(plain["content"][0]["text"])
+    assert plain_payload["success"] is True, plain_payload
+    assert len(plain_payload["data"]["text"]) > 20
     assert payload2["data"]["url"].startswith("https://"), payload2["data"]["url"]
     # browser is now up
     assert find_orphans(), "browser should be running after a search"

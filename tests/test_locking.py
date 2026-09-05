@@ -122,3 +122,58 @@ def test_sweep_orphans_removes_dead_keeps_alive(tmp_path, monkeypatch):
     BrowserRuntime._sweep_orphans()
     assert not dead_dir.exists(), "dead-owner profile dir should be removed"
     assert alive_dir.exists(), "alive-owner profile dir must be kept"
+
+
+def test_contender_cleanup_preserves_owners_devtools_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "PROFILE_DIR", tmp_path)
+    monkeypatch.setattr(server, "LOCK_PATH", tmp_path / ".instance.lock")
+    monkeypatch.setattr(server, "DEVTOOLS_FILE", tmp_path / "DevToolsActivePort")
+    owner = BrowserRuntime()
+    contender = BrowserRuntime()
+    owner._acquire_lock()
+    server.DEVTOOLS_FILE.write_text("12345\n/devtools/browser/owner\n")
+    try:
+        with pytest.raises(RuntimeError, match="owns this profile"):
+            contender.ensure()
+        contender.cleanup()
+        assert server.DEVTOOLS_FILE.read_text() == "12345\n/devtools/browser/owner\n"
+    finally:
+        owner.cleanup()
+
+
+def test_stale_process_identity_does_not_signal_reused_pid(monkeypatch):
+    monkeypatch.setattr(server, "_process_identity", lambda pid: {"pid": pid, "start_ticks": "new"})
+    monkeypatch.setattr(server.os, "killpg", lambda *args: pytest.fail("must not signal a reused PID"))
+    server._stop_recorded_process({"pid": 1234, "start_ticks": "old"})
+
+
+def test_sweep_recovers_recorded_display_and_browser(tmp_path, monkeypatch):
+    base = tmp_path / "chrome-web-v2-profile"
+    dead = base / "99999999"
+    dead.mkdir(parents=True)
+    children = [subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True) for _ in range(2)]
+    try:
+        records = [server._process_identity(child.pid) for child in children]
+        (dead / ".owned-processes.json").write_text(json.dumps(records))
+        monkeypatch.setattr(server.tempfile, "gettempdir", lambda: str(tmp_path))
+        BrowserRuntime._sweep_orphans()
+        assert all(child.wait(timeout=5) < 0 for child in children)
+        assert not dead.exists()
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=5)
+
+
+def test_cleanup_removes_owned_default_profile(tmp_path, monkeypatch):
+    profile = tmp_path / "default-profile"
+    monkeypatch.delenv("CW_PROFILE_DIR", raising=False)
+    monkeypatch.setattr(server, "PROFILE_DIR", profile)
+    monkeypatch.setattr(server, "LOCK_PATH", profile / ".instance.lock")
+    monkeypatch.setattr(server, "DEVTOOLS_FILE", profile / "DevToolsActivePort")
+    runtime = BrowserRuntime()
+    runtime._acquire_lock()
+    (profile / "fixture").write_text("temporary profile")
+    runtime.cleanup()
+    assert not profile.exists()

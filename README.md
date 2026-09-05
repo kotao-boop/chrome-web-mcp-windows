@@ -1,9 +1,10 @@
 # chrome-web-mcp
 
-A stdio Model Context Protocol server that exposes two focused browser tools:
+A stdio Model Context Protocol server that exposes focused browser tools:
 
 - `google_search` — Google search through a JavaScript-rendered Chrome instance.
 - `fetch_url` — JavaScript-rendered readable text extraction for public HTTP(S) URLs.
+- `health_check` — display, browser, queue, and CAPTCHA status.
 
 The server is designed to be configured by any MCP client that can launch a
 stdio command. It does not depend on Hermes Agent.
@@ -47,8 +48,8 @@ scheme. Docker helps only on a Linux host with an X server for `xephyr` mode.
 ## Linux quickstart (Debian/Ubuntu, copy-paste)
 
 ```bash
-# 1. System dependencies (headless xvfb mode needs only these two)
-sudo apt update && sudo apt install -y chromium xvfb
+# 1. System dependencies
+sudo apt update && sudo apt install -y chromium xvfb x11-utils python3-venv
 which chromium || which google-chrome || which chromium-browser
 which Xvfb
 python3 --version  # 3.10+
@@ -56,7 +57,9 @@ python3 --version  # 3.10+
 # Optional: visible-window mode only
 # sudo apt install -y xserver-xephyr
 
-# 2. Install the package (either one)
+# 2. Create an environment and install the package (either one)
+python3 -m venv .venv
+. .venv/bin/activate
 python3 -m pip install -e '.'
 # or: python -m pip install chrome_web_mcp-0.2.0-py3-none-any.whl
 ```
@@ -96,9 +99,8 @@ Notes:
 
 - Replace `/absolute/path/to/chrome-web-mcp` with your checkout path.
 - `CW_CHROME=/usr/bin/chromium` only if auto-detection misses your binary.
-- Call `google_search` and `fetch_url` sequentially, not in parallel:
-  parallel calls from one server process can hit the profile lock
-  (`Another chrome-web MCP instance owns this profile`).
+- Concurrent calls within one server are supported. Searches are serialized;
+  fetches use independent tabs and share a serialized browser startup.
 - `xephyr` mode needs a real desktop `DISPLAY` plus `xserver-xephyr`;
   on a headless host or over SSH without X forwarding it will not start.
   Default `xvfb` mode needs no `DISPLAY`.
@@ -224,8 +226,13 @@ Input:
 
 Only public `http://` and `https://` URLs without embedded credentials are
 accepted. Localhost, private IP ranges, metadata hosts, and non-public DNS
-resolutions are rejected. Redirect destinations are validated before they are
-used. `char_limit` is an integer from 100 to 200000. Text is cut at a
+resolutions are rejected. A mandatory local HTTP proxy validates every upstream
+connection and connects to the validated numeric address, including redirects,
+subresources, WebSockets, and DNS changes. Chrome's loopback proxy bypass, QUIC,
+and non-proxied WebRTC UDP are disabled. IPv6 translation/tunneling addresses
+(NAT64, 6to4, Teredo) are also rejected. `char_limit` is an integer from 100 to
+200000. HTML/text snapshots are read in chunks, with a 16Mi-character extraction
+limit independent of the returned text limit. Text is cut at a
 sentence boundary when possible. Returns `requested_url`, `final_url`,
 `redirected`, `total_chars`, and `truncated` alongside `title` and content
 (`url` mirrors `final_url` for compatibility). `format` defaults to
@@ -289,11 +296,17 @@ through this Google-search queue.
 ## Security and scope
 
 - The server exposes no arbitrary page-context JavaScript tool.
-- Fetching is fail-closed for private networks and credential-bearing URLs.
+- Browser HTTP(S)/WebSocket connections are restricted to public addresses by
+  a local validating proxy; private destinations are rejected before connecting.
+  Input URLs also reject embedded credentials and recognizable secret patterns.
+  This does not classify every possible secret in arbitrary page URLs/content.
 - Each server owns and cleans up its Chrome and Xvfb process groups.
 - Chrome is explicitly forced onto the private X11/Xvfb display, even when the
   host desktop session uses Wayland; the user desktop should not be surfaced.
-- SIGTERM and SIGINT trigger browser cleanup before exit.
+- SIGTERM and SIGINT trigger browser and temporary-profile cleanup before exit.
+  Startup recovers recorded Chrome/display processes using PID and start time,
+  not broad process-name matching. Legacy profiles without process records can
+  recover Chrome by exact profile argument; their Xvfb cannot be safely identified.
 - Google result URLs are normalized and deduplicated before returning.
 
 This package does not bypass authentication or CAPTCHA challenges. It is a
@@ -311,9 +324,12 @@ unless `CW_XPRA_EXPOSE=1` is set, because it once crashed the desktop session.
 ```bash
 python -m pip install -e '.[test]'
 pytest -q
+pytest -q -m 'not live'  # deterministic tests; browser fixtures use local responses
 python -m build
 ```
 
 The end-to-end tests exercise the real stdio MCP handshake, `tools/list`,
 Google search, public URL fetching, and shutdown cleanup. They require Chrome,
-Xvfb, and network access.
+Xvfb, and network access. Tests marked `live` contact Google and can fail if the
+network is unavailable or Google requires a CAPTCHA. Browser security regression
+tests use synthetic responses and local fixtures, without depending on Google.

@@ -26,3 +26,6 @@ packages = ["src/chrome_web_mcp"]
 test = [
   "pytest>=8,<10",
 ]
+
+[tool.pytest.ini_options]
+markers = ["live: requires public Internet and Google (may encounter CAPTCHA)"]
