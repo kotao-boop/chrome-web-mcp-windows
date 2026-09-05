@@ -367,10 +367,10 @@ def test_smart_cut_prefers_sentence_boundary():
 
 def test_pace_warning_fires_after_burst():
     server._SEARCH_TIMES.clear()
-    for _ in range(9):
+    for _ in range(14):
         assert server._pace_warning(server._note_search_start()) is None
     assert "slow down" in (server._pace_warning(server._note_search_start()) or "")
-    assert server._peek_search_count() == 10
+    assert server._peek_search_count() == 15
     server._SEARCH_TIMES.clear()
 
 

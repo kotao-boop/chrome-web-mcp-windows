@@ -871,7 +871,7 @@ _ENSURE_LOCK = asyncio.Lock()
 _LAST_CAPTCHA_TS: float | None = None
 # Sliding window of recent search starts, for burst warnings to agents.
 _PACE_WINDOW_S = 60.0
-_PACE_WARN_N = 10
+_PACE_WARN_N = 15
 _SEARCH_TIMES: collections.deque[float] = collections.deque()
 
 
@@ -1406,7 +1406,7 @@ async def list_tools() -> list[types.Tool]:
                 "Search Google in a JavaScript-rendering Chrome browser running "
                 "non-headless inside Xvfb. Returns structured search results. "
                 "Workflow: first google_search, then fetch_url on interesting "
-                "result URLs for full text. Pace calls: bursts of 10+ searches "
+                "result URLs for full text. Pace calls: bursts of 15+ searches "
                 "per minute raise a pace_warning and risk a Google CAPTCHA."
             ),
             inputSchema={
