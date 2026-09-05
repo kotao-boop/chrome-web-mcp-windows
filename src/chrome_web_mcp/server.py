@@ -763,6 +763,10 @@ _SEARCH_LIMITER = SharedSearchRateLimiter()
 # navigate the SAME target and the second URL overwrites the first before the
 # first read happens (both callers then return the winner's content).
 _FETCH_LOCK = asyncio.Lock()
+# Serialize browser lifecycle (ensure/cleanup/lock) across search AND fetch:
+# ensure() is blocking and not reentrant, so a search racing a fetch would
+# cleanup() the other's starting browser and then fail on the profile lock.
+_ENSURE_LOCK = asyncio.Lock()
 
 
 async def _cdp_call(connection: Any, method: str, params: dict | None = None) -> dict:
@@ -896,7 +900,8 @@ async def _ensure_search_page(browser: Any) -> tuple[Any, str, bool]:
 
 
 async def _extract_google_candidates(query: str, limit: int) -> list[dict]:
-    browser_ws = await asyncio.to_thread(_RUNTIME.ensure)
+    async with _ENSURE_LOCK:
+        browser_ws = await asyncio.to_thread(_RUNTIME.ensure)
     browser = await websockets.connect(browser_ws, max_size=MAX_CDP_MESSAGE)
     page: Any = None
     try:
@@ -1007,7 +1012,8 @@ async def _fetch_page(url: str, char_limit: int) -> dict:
     # Validate the requested URL up front (fail-closed).
     validated = _validate_public_url(url)
     async with _FETCH_LOCK:
-        browser_ws = await asyncio.to_thread(_RUNTIME.ensure)
+        async with _ENSURE_LOCK:
+            browser_ws = await asyncio.to_thread(_RUNTIME.ensure)
         browser = await websockets.connect(browser_ws, max_size=MAX_CDP_MESSAGE)
         page: Any = None
         try:
