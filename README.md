@@ -193,7 +193,7 @@ with `title`, `url`, `description`, and `position` fields, plus `waited_ms`
 Input:
 
 ```json
-{"url": "https://example.com", "char_limit": 15000, "format": "text"}
+{"url": "https://example.com", "char_limit": 15000, "format": "markdown"}
 ```
 
 Only public `http://` and `https://` URLs without embedded credentials are
@@ -202,10 +202,15 @@ resolutions are rejected. Redirect destinations are validated before they are
 used. `char_limit` is an integer from 100 to 200000. Text is cut at a
 sentence boundary when possible. Returns `requested_url`, `final_url`,
 `redirected`, `total_chars`, and `truncated` alongside `title` and content
-(`url` mirrors `final_url` for compatibility). `format` is `text` (readable
-text), `markdown` (headings/paragraphs plus `links`), or `links` (text plus
-follow-up link targets). Concurrent fetches are parallel-safe; each uses its
-own tab.
+(`url` mirrors `final_url` for compatibility). `format` defaults to
+`markdown`: shaped readable markdown with boilerplate removed
+(`trafilatura`, `html2text` fallback). The response reports `formatted: true`
+and the `extraction` method, so agents can tell it was shaped — if content
+looks missing, retry with `format: "text"` for the full rendered text.
+`format: "links"` adds follow-up link targets. Concurrent fetches are
+parallel-safe; each uses its own tab. This shaping reuses the same
+`trafilatura` + `html2text` approach as a self-hosted jina-compatible Reader,
+without needing the extra service.
 
 ### `health_check`
 

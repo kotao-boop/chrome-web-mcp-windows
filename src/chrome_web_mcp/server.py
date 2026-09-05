@@ -36,6 +36,15 @@ import websockets
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
+try:
+    import trafilatura
+except ImportError:  # pragma: no cover - dependency declared in pyproject
+    trafilatura = None  # type: ignore[assignment]
+try:
+    import html2text
+except ImportError:  # pragma: no cover - dependency declared in pyproject
+    html2text = None  # type: ignore[assignment]
+
 HERE = Path(__file__).resolve().parent
 # Each MCP server process (one per Hermes session) gets its OWN throwaway Chrome
 # profile under /tmp, so sessions never contend for a shared profile: a live
@@ -1056,6 +1065,56 @@ _FETCH_MD_JS = r"""(() => {
 })()"""
 
 
+# Page links as follow-up crawl targets (used with shaped markdown).
+_FETCH_LINKS_JS = r"""(() => {
+  const clean = v => (v || '').replace(/\s+/g, ' ').trim();
+  const out = [];
+  for (const a of document.querySelectorAll('a[href]')) {
+    const t = clean(a.innerText || a.textContent);
+    let h = '';
+    try { h = new URL(a.href, location.href).href; } catch (e) { continue; }
+    if (!/^https?:\/\//i.test(h)) continue;
+    if (t) out.push({text: t.slice(0, 200), url: h});
+    if (out.length >= 200) break;
+  }
+  return JSON.stringify(out);
+})()"""
+
+
+def _shape_markdown(html: str, url: str) -> tuple[str, str]:
+    """Shape rendered HTML into boilerplate-free markdown.
+
+    Returns (markdown, extraction): trafilatura first, html2text fallback,
+    dom-walk last resort. An empty markdown with extraction "none" means the
+    shaper saw nothing usable (caller: retry with format "text").
+    """
+    if trafilatura is not None:
+        try:
+            shaped = trafilatura.extract(
+                html,
+                output_format="markdown",
+                include_links=True,
+                include_images=False,
+                url=url,
+                deduplicate=True,
+            )
+        except Exception:
+            shaped = None
+        if shaped and len(shaped.strip()) > 200:
+            return shaped.strip(), "trafilatura"
+    if html2text is not None:
+        try:
+            conv = html2text.HTML2Text()
+            conv.body_width = 0
+            conv.ignore_images = True
+            shaped = conv.handle(html)
+        except Exception:
+            shaped = None
+        if shaped and shaped.strip():
+            return shaped.strip(), "html2text"
+    return "", "none"
+
+
 def _smart_cut(text: str, limit: int) -> tuple[str, bool]:
     """Cut text at a sentence/word boundary; return (cut, truncated)."""
     if len(text) <= limit:
@@ -1126,22 +1185,49 @@ async def _fetch_page(url: str, char_limit: int, format: str = "text") -> dict:
                     "total_chars": len(full),
                     "truncated": was_cut,
                     "format": "text",
+                    "formatted": False,
                 }
             )
         else:
-            raw = await _evaluate(page, _FETCH_MD_JS)
-            data = json.loads(raw or "{}")
-            full = str(data.get("markdown", "") or "")
-            title = " ".join(str(data.get("title", "")).split())
-            links = data.get("links", [])
+            html = str(
+                await _evaluate(
+                    page,
+                    "document.documentElement ? document.documentElement.outerHTML : ''",
+                )
+            )
+            shaped, method = await asyncio.to_thread(_shape_markdown, html, final_url)
+            links_raw = await _evaluate(page, _FETCH_LINKS_JS)
+            try:
+                links = json.loads(links_raw or "[]")
+            except (ValueError, TypeError):
+                links = []
             if not isinstance(links, list):
                 links = []
+            if not shaped:
+                # Shaper saw nothing usable: fall back to the in-page DOM walk
+                # so the agent still gets something (extraction says "dom").
+                raw = await _evaluate(page, _FETCH_MD_JS)
+                try:
+                    data = json.loads(raw or "{}")
+                except (ValueError, TypeError):
+                    data = {}
+                shaped = str(data.get("markdown", "") or "")
+                if not links:
+                    maybe = data.get("links", [])
+                    links = maybe if isinstance(maybe, list) else []
+                method = "dom" if shaped.strip() else "none"
+            title = " ".join(
+                str(await _evaluate(page, "document.title || ''")).split()
+            )
+            full = shaped
             cut, was_cut = _smart_cut(full, char_limit)
             entry: dict = {
                 "title": title[:300],
                 "total_chars": len(full),
                 "truncated": was_cut,
                 "format": format,
+                "formatted": True,
+                "extraction": method,
                 "links": links[:200],
             }
             if format == "markdown":
@@ -1208,8 +1294,11 @@ async def list_tools() -> list[types.Tool]:
             name="fetch_url",
             description=(
                 "Fetch a public HTTP(S) URL with JavaScript rendering (Xvfb Chrome) "
-                "and return readable content plus requested/final URLs, redirect "
-                "flag, and total_chars. Use after google_search on result URLs, "
+                "and return shaped readable markdown plus requested/final URLs, "
+                "redirect flag, and total_chars. The markdown is shaped "
+                "(boilerplate removed, extraction method reported); if content "
+                "looks missing, retry with format:text for the full rendered "
+                "text. Use after google_search on result URLs, "
                 "or for pages that need JS to render (SPAs, "
                 "paywalled-after-consent layouts, etc.). Parallel calls are safe; "
                 "each fetch uses its own tab. char_limit caps the returned text."
@@ -1230,8 +1319,8 @@ async def list_tools() -> list[types.Tool]:
                     },
                     "format": {
                         "type": "string",
-                        "description": "text: readable text; markdown: headings/paragraphs plus links; links: text plus follow-up link targets",
-                        "default": "text",
+                        "description": "markdown (default): shaped readable markdown, boilerplate removed. text: full rendered text, use when markdown looks incomplete. links: text plus follow-up link targets",
+                        "default": "markdown",
                         "enum": ["text", "markdown", "links"],
                     },
                 },
@@ -1314,7 +1403,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         elif name == "fetch_url":
             url = arguments.get("url", "")
             char_limit = arguments.get("char_limit", 15000)
-            format = arguments.get("format", "text")
+            format = arguments.get("format", "markdown")
             if not isinstance(url, str) or not url.strip():
                 raise ValueError("url is required")
             if len(url) > 2048:
