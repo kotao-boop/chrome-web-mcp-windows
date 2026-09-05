@@ -265,11 +265,34 @@ class BrowserRuntime:
             env.pop(key, None)
         return env
 
+    @staticmethod
+    def _discover_xauthority() -> str | None:
+        """Find the Xauthority file needed to connect to a desktop Xwayland."""
+        configured = os.environ.get("XAUTHORITY", "").strip()
+        if configured and Path(configured).is_file():
+            return configured
+
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+        if runtime_dir:
+            candidates = list(Path(runtime_dir).glob(".mutter-Xwaylandauth.*"))
+            candidates = [path for path in candidates if path.is_file()]
+            if candidates:
+                candidates.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
+                return str(candidates[0])
+
+        home_xauthority = Path.home() / ".Xauthority"
+        if home_xauthority.is_file():
+            return str(home_xauthority)
+        return None
+
     def _human_display_environment(self) -> dict[str, str]:
         """Prepare an X11 client environment for the user's desktop display."""
         env = os.environ.copy()
         env["DISPLAY"] = self.user_display or ""
         env["XDG_SESSION_TYPE"] = "x11"
+        xauthority = self._discover_xauthority()
+        if xauthority:
+            env["XAUTHORITY"] = xauthority
         for key in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
             env.pop(key, None)
         return env
@@ -560,7 +583,10 @@ class BrowserRuntime:
         number = proc.stdout.readline().strip()
         if not number.isdigit():
             _terminate_owned_process(minimizer, 2)
-            raise RuntimeError("Xephyr returned an invalid display number")
+            raise RuntimeError(
+                "Xephyr could not allocate a nested display. "
+                "Check DISPLAY and XAUTHORITY access to the desktop X server."
+            )
         display = f":{number}"
         for _ in range(30):
             check = subprocess.run(

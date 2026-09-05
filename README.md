@@ -143,6 +143,11 @@ Optional environment variables:
   tool calls can never pop a window to the front outside of it. Requires
   `Xephyr` (`xserver-xephyr`) and a user `DISPLAY`. Recommended when you want
   to watch searches or solve a CAPTCHA by hand.
+- When `CW_DISPLAY_MODE=xephyr`, the server preserves an explicit `XAUTHORITY`
+  or automatically discovers Mutter's `.mutter-Xwaylandauth.*` file under
+  `XDG_RUNTIME_DIR`, then falls back to `~/.Xauthority`. This lets stdio MCP
+  clients that filter their inherited environment still connect to the user's
+  Xwayland display.
 - `CW_XPRA_EXPOSE` — set to `1` to re-enable automatic Xpra attach when a
   CAPTCHA appears. Off by default: automatic attach once crashed the desktop
   session, so the server only reports the CAPTCHA and leaves the browser

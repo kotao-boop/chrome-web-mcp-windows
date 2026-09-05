@@ -80,6 +80,30 @@ def test_human_display_environment_uses_real_x11_display(monkeypatch):
     assert "WAYLAND_DISPLAY" not in env
 
 
+def test_human_display_environment_discovers_mutter_xauthority(tmp_path, monkeypatch):
+    xauth = tmp_path / ".mutter-Xwaylandauth.test"
+    xauth.write_bytes(b"cookie")
+    monkeypatch.delenv("XAUTHORITY", raising=False)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+
+    env = server.BrowserRuntime()._human_display_environment()
+
+    assert env["XAUTHORITY"] == str(xauth)
+
+
+def test_human_display_environment_prefers_explicit_xauthority(tmp_path, monkeypatch):
+    explicit = tmp_path / "explicit-xauth"
+    explicit.write_bytes(b"cookie")
+    discovered = tmp_path / ".mutter-Xwaylandauth.test"
+    discovered.write_bytes(b"cookie")
+    monkeypatch.setenv("XAUTHORITY", str(explicit))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+
+    env = server.BrowserRuntime()._human_display_environment()
+
+    assert env["XAUTHORITY"] == str(explicit)
+
+
 def test_captcha_error_is_marked_for_the_mcp_client(monkeypatch):
     async def fake_search(query, limit):
         raise server.CaptchaRequired("Google CAPTCHA detected")
