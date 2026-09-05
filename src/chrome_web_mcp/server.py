@@ -64,6 +64,31 @@ _BLOCKED_HOSTS = {"localhost", "metadata.google.internal", "metadata.goog"}
 _CDP_IDS = itertools.count(1)
 
 
+class CaptchaRequired(RuntimeError):
+    """The Google page requires a human interaction before search can continue."""
+
+
+def _is_google_challenge(url: str, text: str) -> bool:
+    """Detect Google's challenge page without treating ordinary result text as one."""
+    parsed = urllib.parse.urlparse(url)
+    if not _is_google_host(parsed.hostname):
+        return False
+    path = parsed.path.lower()
+    if path == "/sorry" or path.startswith("/sorry/"):
+        return True
+    normalized = " ".join(text.lower().split())
+    return any(
+        phrase in normalized
+        for phrase in (
+            "our systems have detected unusual traffic",
+            "unusual traffic from your computer network",
+            "automated queries",
+            "not a robot",
+            "captcha",
+        )
+    )
+
+
 def _is_google_host(host: str | None) -> bool:
     normalized = (host or "").lower().rstrip(".")
     return normalized == "google.com" or normalized.endswith(".google.com")
@@ -194,11 +219,21 @@ class BrowserRuntime:
 
     def __init__(self) -> None:
         self.xvfb: subprocess.Popen | None = None
+        self.xephyr: subprocess.Popen | None = None
         self.chrome: subprocess.Popen | None = None
         self.lock_file: Any = None
         self.display: str | None = None
         self.port: int | None = None
         self.browser_ws: str | None = None
+        self.xpra_server: subprocess.Popen | None = None
+        self.xpra_client: subprocess.Popen | None = None
+        self.user_display = os.environ.get("DISPLAY")
+        # CW_DISPLAY_MODE=xvfb (default): Chrome on a private Xvfb display,
+        # fully hidden, never steals focus.
+        # CW_DISPLAY_MODE=xephyr: Chrome on a nested Xephyr window living on
+        # the user's desktop. The user can see/minimize it, but Chrome inside
+        # can never pop a window to the front outside of it.
+        self.display_mode = os.environ.get("CW_DISPLAY_MODE", "xvfb").strip().lower()
         # A long-lived background search tab, reused across queries so we do not
         # repeatedly open/close targets (which looks like bot activity to Google).
         self.search_target_id: str | None = None
@@ -229,6 +264,114 @@ class BrowserRuntime:
         for key in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
             env.pop(key, None)
         return env
+
+    @staticmethod
+    def _discover_xauthority() -> str | None:
+        """Find the Xauthority file needed to connect to a desktop Xwayland."""
+        configured = os.environ.get("XAUTHORITY", "").strip()
+        if configured and Path(configured).is_file():
+            return configured
+
+        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+        if runtime_dir:
+            candidates = list(Path(runtime_dir).glob(".mutter-Xwaylandauth.*"))
+            candidates = [path for path in candidates if path.is_file()]
+            if candidates:
+                candidates.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
+                return str(candidates[0])
+
+        home_xauthority = Path.home() / ".Xauthority"
+        if home_xauthority.is_file():
+            return str(home_xauthority)
+        return None
+
+    def _human_display_environment(self) -> dict[str, str]:
+        """Prepare an X11 client environment for the user's desktop display."""
+        env = os.environ.copy()
+        env["DISPLAY"] = self.user_display or ""
+        env["XDG_SESSION_TYPE"] = "x11"
+        xauthority = self._discover_xauthority()
+        if xauthority:
+            env["XAUTHORITY"] = xauthority
+        for key in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
+            env.pop(key, None)
+        return env
+
+    def hide_for_human(self) -> None:
+        """Stop the temporary Xpra shadow server and its visible client."""
+        _terminate_owned_process(self.xpra_client, 3)
+        _terminate_owned_process(self.xpra_server, 3)
+        self.xpra_client = None
+        self.xpra_server = None
+
+    def expose_for_human(self) -> None:
+        """Attach the private Xvfb display to the user's desktop via Xpra."""
+        if not self.display:
+            raise RuntimeError("CAPTCHA browser display is not ready")
+        if not self.user_display:
+            raise RuntimeError("CAPTCHA display is unavailable: user DISPLAY is not set")
+        if self.xpra_client and self.xpra_client.poll() is None:
+            return
+        xpra = shutil.which("xpra")
+        if not xpra:
+            raise RuntimeError("Xpra is not installed; install the xpra package to solve CAPTCHA")
+        self.hide_for_human()
+        server_env = self._browser_environment(self.display)
+        self.xpra_server = subprocess.Popen(
+            [
+                xpra,
+                "shadow",
+                self.display,
+                "--daemon=no",
+                "--mdns=no",
+                "--notifications=no",
+                "--bell=no",
+                "--system-tray=no",
+            ],
+            env=server_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        client_env = self._human_display_environment()
+        ready = False
+        for _ in range(40):
+            if self.xpra_server.poll() is not None:
+                break
+            status = subprocess.run(
+                [xpra, "list"],
+                env=client_env,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if self.display in status.stdout:
+                ready = True
+                break
+            time.sleep(0.25)
+        if not ready:
+            self.hide_for_human()
+            raise RuntimeError("Xpra shadow session did not become ready")
+        self.xpra_client = subprocess.Popen(
+            [
+                xpra,
+                "attach",
+                self.display,
+                "--opengl=no",
+                "--clipboard=no",
+                "--notifications=no",
+                "--bell=no",
+                "--system-tray=no",
+            ],
+            env=client_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        time.sleep(0.25)
+        if self.xpra_client.poll() is not None:
+            self.hide_for_human()
+            raise RuntimeError("Xpra attach client exited before showing the browser")
 
     @staticmethod
     def _chrome_executable() -> str:
@@ -385,6 +528,86 @@ class BrowserRuntime:
             time.sleep(0.1)
         raise RuntimeError("Xvfb failed its readiness check")
 
+    def _start_xephyr(self, host_display: str) -> str:
+        """Start a nested Xephyr window on the user's desktop and return its display.
+
+        Xephyr is a plain X client: it appears as one ordinary window the user
+        can minimize, move to another workspace, or close. Chrome runs *inside*
+        it, so tool calls can never pop a window to the front of the desktop
+        the way running Chrome directly on DISPLAY would.
+        """
+        env = self._human_display_environment()
+        env["DISPLAY"] = host_display
+        # Arm a minimize helper BEFORE Xephyr maps its window: `xdotool search
+        # --sync` blocks until the window appears, then minimizes it within
+        # milliseconds. Starting minimized this way leaves (almost) no visible
+        # flash, unlike sleep-then-minimize after the fact.
+        try:
+            minimizer = subprocess.Popen(
+                ["xdotool", "search", "--sync", "--onlyvisible", "--name", "chrome-web-mcp", "windowminimize"],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            minimizer = None
+        try:
+            proc = subprocess.Popen(
+                [
+                    "Xephyr",
+                    "-displayfd",
+                    "1",
+                    "-screen",
+                    "1365x900x24",
+                    "-title",
+                    "chrome-web-mcp",
+                    "-nolisten",
+                    "tcp",
+                ],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                start_new_session=True,
+            )
+        except Exception:
+            _terminate_owned_process(minimizer, 2)
+            raise
+        self.xephyr = proc
+        assert proc.stdout is not None
+        ready, _, _ = select.select([proc.stdout], [], [], 10)
+        if not ready:
+            _terminate_owned_process(minimizer, 2)
+            raise RuntimeError("Xephyr did not allocate a display within 10 seconds")
+        number = proc.stdout.readline().strip()
+        if not number.isdigit():
+            _terminate_owned_process(minimizer, 2)
+            raise RuntimeError(
+                "Xephyr could not allocate a nested display. "
+                "Check DISPLAY and XAUTHORITY access to the desktop X server."
+            )
+        display = f":{number}"
+        for _ in range(30):
+            check = subprocess.run(
+                ["xdpyinfo", "-display", display],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+            if check.returncode == 0:
+                if minimizer is not None:
+                    try:
+                        minimizer.wait(timeout=10)
+                    except subprocess.SubprocessError:
+                        _terminate_owned_process(minimizer, 2)
+                return display
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+        _terminate_owned_process(minimizer, 2)
+        raise RuntimeError("Xephyr failed its readiness check")
+
     def _start_chrome(self, display: str) -> tuple[int, str]:
         PROFILE_DIR.mkdir(parents=True, exist_ok=True)
         DEVTOOLS_FILE.unlink(missing_ok=True)
@@ -400,6 +623,7 @@ class BrowserRuntime:
             "--disable-sync",
             "--password-store=basic",
             "--disable-gpu",
+            "--disable-dev-shm-usage",
             "--mute-audio",
             "--disable-blink-features=AutomationControlled",
             "--lang=ja-JP",
@@ -436,7 +660,14 @@ class BrowserRuntime:
         self.cleanup()
         self._acquire_lock()
         try:
-            self.display = self._start_xvfb()
+            if self.display_mode == "xephyr":
+                if not self.user_display:
+                    raise RuntimeError(
+                        "CW_DISPLAY_MODE=xephyr needs a user DISPLAY, but none is set"
+                    )
+                self.display = self._start_xephyr(self.user_display)
+            else:
+                self.display = self._start_xvfb()
             self.port, self.browser_ws = self._start_chrome(self.display)
             return self.browser_ws
         except Exception:
@@ -444,9 +675,12 @@ class BrowserRuntime:
             raise
 
     def cleanup(self) -> None:
+        self.hide_for_human()
         _terminate_owned_process(self.chrome, 5)
+        _terminate_owned_process(self.xephyr, 3)
         _terminate_owned_process(self.xvfb, 3)
         self.chrome = None
+        self.xephyr = None
         self.xvfb = None
         self.display = None
         self.port = None
@@ -524,6 +758,15 @@ BrowserRuntime._sweep_orphans()
 # Serialize searches within this process and reserve a shared inter-process slot.
 _SEARCH_LOCK = asyncio.Lock()
 _SEARCH_LIMITER = SharedSearchRateLimiter()
+# Serialize fetches within this process: _fetch_page reuses a single long-lived
+# fetch tab (separate from the search tab), so two concurrent fetches would
+# navigate the SAME target and the second URL overwrites the first before the
+# first read happens (both callers then return the winner's content).
+_FETCH_LOCK = asyncio.Lock()
+# Serialize browser lifecycle (ensure/cleanup/lock) across search AND fetch:
+# ensure() is blocking and not reentrant, so a search racing a fetch would
+# cleanup() the other's starting browser and then fail on the profile lock.
+_ENSURE_LOCK = asyncio.Lock()
 
 
 async def _cdp_call(connection: Any, method: str, params: dict | None = None) -> dict:
@@ -606,6 +849,41 @@ _EXTRACT_RESULTS_JS = r"""(() => {
 })()"""
 
 
+async def _ensure_reused_tab(browser: Any, which: str) -> Any:
+    """Return a connected page socket for a long-lived search/fetch tab.
+
+    Reuses the existing target when it is still alive, otherwise creates a
+    background tab. Both search and fetch share this so their target handling
+    cannot drift apart.
+    """
+    attr = "search_target_id" if which == "search" else "fetch_target_id"
+    target_id = getattr(_RUNTIME, attr)
+    if target_id:
+        try:
+            alive = await _cdp_call(
+                browser, "Target.getTargetInfo", {"targetId": target_id}
+            )
+            if not alive.get("targetInfo", {}).get("targetId"):
+                target_id = None
+        except Exception:
+            target_id = None
+    if not target_id:
+        created = await _cdp_call(
+            browser,
+            "Target.createTarget",
+            {"url": "about:blank", "background": True, "newWindow": False},
+        )
+        target_id = created.get("targetId")
+        if not target_id or _RUNTIME.port is None:
+            raise RuntimeError(f"Chrome did not create a {which} tab")
+        setattr(_RUNTIME, attr, target_id)
+    port = _RUNTIME.port
+    return await websockets.connect(
+        f"ws://127.0.0.1:{port}/devtools/page/{target_id}",
+        max_size=MAX_CDP_MESSAGE,
+    )
+
+
 async def _ensure_search_page(browser: Any) -> tuple[Any, str, bool]:
     """Return (page_ws, target_id, created) for the long-lived search tab.
 
@@ -614,43 +892,16 @@ async def _ensure_search_page(browser: Any) -> tuple[Any, str, bool]:
     ephemeral (re-connected per search), so we identify the target by its ID and
     simply verify it is still alive before reconnecting the page socket.
     """
-    # Reuse the existing target if it is still alive in this browser session.
-    if _RUNTIME.search_target_id:
-        try:
-            alive = await _cdp_call(
-                browser, "Target.getTargetInfo", {"targetId": _RUNTIME.search_target_id}
-            )
-            if alive.get("targetInfo", {}).get("targetId"):
-                port = _RUNTIME.port
-                if port:
-                    page = await websockets.connect(
-                        f"ws://127.0.0.1:{port}/devtools/page/{_RUNTIME.search_target_id}",
-                        max_size=MAX_CDP_MESSAGE,
-                    )
-                    return page, _RUNTIME.search_target_id, False
-        except Exception:
-            pass
-        _RUNTIME.search_target_id = None
-    # No usable target: create one (background tab, not a new window).
-    created = await _cdp_call(
-        browser,
-        "Target.createTarget",
-        {"url": "about:blank", "background": True, "newWindow": False},
-    )
-    target_id = created.get("targetId")
-    if not target_id or _RUNTIME.port is None:
-        raise RuntimeError("Chrome did not create a search tab")
-    _RUNTIME.search_target_id = target_id
-    port = _RUNTIME.port
-    page = await websockets.connect(
-        f"ws://127.0.0.1:{port}/devtools/page/{target_id}",
-        max_size=MAX_CDP_MESSAGE,
-    )
-    return page, target_id, True
+    previous = _RUNTIME.search_target_id
+    page = await _ensure_reused_tab(browser, "search")
+    current = _RUNTIME.search_target_id
+    assert current is not None
+    return page, current, previous != current
 
 
 async def _extract_google_candidates(query: str, limit: int) -> list[dict]:
-    browser_ws = await asyncio.to_thread(_RUNTIME.ensure)
+    async with _ENSURE_LOCK:
+        browser_ws = await asyncio.to_thread(_RUNTIME.ensure)
     browser = await websockets.connect(browser_ws, max_size=MAX_CDP_MESSAGE)
     page: Any = None
     try:
@@ -684,6 +935,17 @@ async def _extract_google_candidates(query: str, limit: int) -> list[dict]:
         final_url = str(await _evaluate(page, "location.href"))
         if not _is_google_host(urllib.parse.urlparse(final_url).hostname):
             raise RuntimeError("Google navigation left the allowed origin")
+        body_text = str(await _evaluate(page, "document.body?.innerText || ''"))
+        if _is_google_challenge(final_url, body_text):
+            if _xpra_expose_enabled():
+                try:
+                    await asyncio.to_thread(_RUNTIME.expose_for_human)
+                    detail = "Xpra has shown the CAPTCHA browser window; solve it, then retry the same search."
+                except Exception as exc:
+                    detail = f"CAPTCHA detected, but the browser could not be shown: {exc}"
+            else:
+                detail = _captcha_detail_for_mode()
+            raise CaptchaRequired(detail)
         raw = await _evaluate(page, _EXTRACT_RESULTS_JS)
         candidates = json.loads(raw or "[]")
         if not isinstance(candidates, list):
@@ -699,6 +961,20 @@ async def _extract_google_candidates(query: str, limit: int) -> list[dict]:
         await browser.close()
 
 
+def _xpra_expose_enabled() -> bool:
+    """Xpra auto-attach is opt-in: it once crashed the desktop session."""
+    return os.environ.get("CW_XPRA_EXPOSE", "").strip() == "1"
+
+
+def _captcha_detail_for_mode() -> str:
+    if _RUNTIME.display_mode == "xephyr":
+        return (
+            "Google CAPTCHA detected. Solve it in the chrome-web-mcp window "
+            "on your desktop, then retry the same search."
+        )
+    return "Google CAPTCHA detected. Wait a while, then retry the same search."
+
+
 async def _search_google(query: str, limit: int) -> list[dict]:
     """Run one Google search with process-wide pacing and a shared slot queue."""
     async with _SEARCH_LOCK:
@@ -709,6 +985,7 @@ async def _search_google(query: str, limit: int) -> list[dict]:
     results = await _build_results(candidates, limit, resolve_url=_resolve_candidate_url)
     if not results:
         raise RuntimeError("Google rendered no usable external search results")
+    await asyncio.to_thread(_RUNTIME.hide_for_human)
     return results
 
 
@@ -734,58 +1011,38 @@ async def _fetch_page(url: str, char_limit: int) -> dict:
     """
     # Validate the requested URL up front (fail-closed).
     validated = _validate_public_url(url)
-    browser_ws = await asyncio.to_thread(_RUNTIME.ensure)
-    browser = await websockets.connect(browser_ws, max_size=MAX_CDP_MESSAGE)
-    page: Any = None
-    try:
-        # Reuse or create a dedicated fetch tab.
-        if _RUNTIME.fetch_target_id:
-            try:
-                alive = await _cdp_call(
-                    browser, "Target.getTargetInfo", {"targetId": _RUNTIME.fetch_target_id}
-                )
-                if not alive.get("targetInfo", {}).get("targetId"):
-                    _RUNTIME.fetch_target_id = None
-            except Exception:
-                _RUNTIME.fetch_target_id = None
-        if not _RUNTIME.fetch_target_id:
-            created = await _cdp_call(
-                browser,
-                "Target.createTarget",
-                {"url": "about:blank", "background": True, "newWindow": False},
-            )
-            _RUNTIME.fetch_target_id = created.get("targetId")
-            if not _RUNTIME.fetch_target_id or _RUNTIME.port is None:
-                raise RuntimeError("Chrome did not create a fetch tab")
-        page = await websockets.connect(
-            f"ws://127.0.0.1:{_RUNTIME.port}/devtools/page/{_RUNTIME.fetch_target_id}",
-            max_size=MAX_CDP_MESSAGE,
-        )
-        await _cdp_call(page, "Page.enable")
-        await _cdp_call(page, "Runtime.enable")
-        await _cdp_call(page, "Page.navigate", {"url": validated})
-        await _wait_ready(page)
-        # Re-validate the final URL after redirects (catch public->local SSRF).
-        final_url = str(await _evaluate(page, "location.href"))
-        _validate_public_url(final_url)
-        raw = await _evaluate(page, _FETCH_TEXT_JS)
-        data = json.loads(raw or "{}")
-        text = " ".join(str(data.get("text", "")).split())
-        title = " ".join(str(data.get("title", "")).split())
-        truncated = len(text) > char_limit
-        return {
-            "url": final_url,
-            "title": title[:300],
-            "text": text[:char_limit],
-            "truncated": truncated,
-        }
-    finally:
-        if page is not None:
-            try:
-                await page.close()
-            except Exception:
-                pass
-        await browser.close()
+    async with _FETCH_LOCK:
+        async with _ENSURE_LOCK:
+            browser_ws = await asyncio.to_thread(_RUNTIME.ensure)
+        browser = await websockets.connect(browser_ws, max_size=MAX_CDP_MESSAGE)
+        page: Any = None
+        try:
+            page = await _ensure_reused_tab(browser, "fetch")
+            await _cdp_call(page, "Page.enable")
+            await _cdp_call(page, "Runtime.enable")
+            await _cdp_call(page, "Page.navigate", {"url": validated})
+            await _wait_ready(page)
+            # Re-validate the final URL after redirects (catch public->local SSRF).
+            final_url = str(await _evaluate(page, "location.href"))
+            _validate_public_url(final_url)
+            raw = await _evaluate(page, _FETCH_TEXT_JS)
+            data = json.loads(raw or "{}")
+            text = " ".join(str(data.get("text", "")).split())
+            title = " ".join(str(data.get("title", "")).split())
+            truncated = len(text) > char_limit
+            return {
+                "url": final_url,
+                "title": title[:300],
+                "text": text[:char_limit],
+                "truncated": truncated,
+            }
+        finally:
+            if page is not None:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+            await browser.close()
 
 
 @app.list_tools()
@@ -869,6 +1126,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             payload = {"success": True, "data": await _fetch_page(url.strip(), char_limit)}
         else:
             raise ValueError(f"Unknown tool: {name}")
+    except CaptchaRequired as exc:
+        payload = {"success": False, "error": str(exc), "captcha_required": True}
     except Exception as exc:
         payload = {"success": False, "error": str(exc)}
     return [types.TextContent(type="text", text=json.dumps(payload, ensure_ascii=False))]

@@ -7,6 +7,8 @@ import tempfile
 
 import pytest
 
+from typing import Any
+
 # Use a throwaway Chrome profile/lock so the in-process live test does not
 # collide with a live chrome-web-v2 server holding the default profile lock.
 _SANDBOX = tempfile.mkdtemp(prefix="cw-v2-test-")
@@ -17,8 +19,20 @@ os.environ["CW_RATE_LIMIT_DB"] = os.path.join(_SANDBOX, "rate-limit.sqlite3")
 from chrome_web_mcp import server
 
 
+# MCP's @app.list_tools() / @app.call_tool() decorators leak wrapper signatures
+# into static typing, so direct calls trip checkers even though they work at
+# runtime. These aliases document that and keep call sites clean.
+_list_tools: Any = server.list_tools
+_call_tool: Any = server.call_tool
+
+
+def run_async(awaitable):
+    """Run an async call in a sync test."""
+    return asyncio.run(awaitable)
+
+
 def test_exposes_google_search_and_fetch_url_tool_names():
-    tools = asyncio.run(server.list_tools())
+    tools = run_async(_list_tools())
     assert sorted(tool.name for tool in tools) == ["fetch_url", "google_search"]
 
 
@@ -48,6 +62,86 @@ def test_shared_rate_limiter_reserves_slots_across_processes(tmp_path):
     assert slots[1] - slots[0] >= 0.9
 
 
+def test_google_challenge_is_detected_from_url_or_rendered_text():
+    assert server._is_google_challenge("https://www.google.com/sorry/index", "")
+    assert server._is_google_challenge("https://www.google.com/search?q=x", "Our systems have detected unusual traffic")
+    assert not server._is_google_challenge("https://www.google.com/search?q=x", "Normal search results")
+
+
+def test_human_display_environment_uses_real_x11_display(monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
+
+    env = server.BrowserRuntime()._human_display_environment()
+
+    assert env["DISPLAY"] == ":0"
+    assert env["XDG_SESSION_TYPE"] == "x11"
+    assert "WAYLAND_DISPLAY" not in env
+
+
+def test_human_display_environment_discovers_mutter_xauthority(tmp_path, monkeypatch):
+    xauth = tmp_path / ".mutter-Xwaylandauth.test"
+    xauth.write_bytes(b"cookie")
+    monkeypatch.delenv("XAUTHORITY", raising=False)
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+
+    env = server.BrowserRuntime()._human_display_environment()
+
+    assert env["XAUTHORITY"] == str(xauth)
+
+
+def test_human_display_environment_prefers_explicit_xauthority(tmp_path, monkeypatch):
+    explicit = tmp_path / "explicit-xauth"
+    explicit.write_bytes(b"cookie")
+    discovered = tmp_path / ".mutter-Xwaylandauth.test"
+    discovered.write_bytes(b"cookie")
+    monkeypatch.setenv("XAUTHORITY", str(explicit))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+
+    env = server.BrowserRuntime()._human_display_environment()
+
+    assert env["XAUTHORITY"] == str(explicit)
+
+
+def test_captcha_error_is_marked_for_the_mcp_client(monkeypatch):
+    async def fake_search(query, limit):
+        raise server.CaptchaRequired("Google CAPTCHA detected")
+
+    monkeypatch.setattr(server, "_search_google", fake_search)
+    content = run_async(_call_tool("google_search", {"query": "test", "limit": 1}))
+    payload = json.loads(content[0].text)
+
+    assert payload == {"success": False, "error": "Google CAPTCHA detected", "captcha_required": True}
+
+
+def test_expose_for_human_starts_shadow_and_attach(monkeypatch):
+    calls = []
+
+    class FakeProcess:
+        pid = 12345
+
+        def poll(self):
+            return None
+
+    monkeypatch.setattr(server.shutil, "which", lambda name: "/usr/bin/xpra")
+    monkeypatch.setattr(server.subprocess, "Popen", lambda command, **kwargs: calls.append((command, kwargs)) or FakeProcess())
+    monkeypatch.setattr(
+        server.subprocess,
+        "run",
+        lambda command, **kwargs: type("Result", (), {"stdout": "LIVE session at :77"})(),
+    )
+    runtime = server.BrowserRuntime()
+    runtime.display = ":77"
+    runtime.user_display = ":0"
+
+    runtime.expose_for_human()
+
+    assert calls[0][0][:3] == ["/usr/bin/xpra", "shadow", ":77"]
+    assert calls[1][0][:3] == ["/usr/bin/xpra", "attach", ":77"]
+    assert calls[1][1]["env"]["DISPLAY"] == ":0"
+
+
 def test_call_tool_fetch_url_validates_and_delegates(monkeypatch):
     captured = {}
 
@@ -57,21 +151,21 @@ def test_call_tool_fetch_url_validates_and_delegates(monkeypatch):
         return {"url": url, "title": "Example", "text": "hello", "truncated": False}
 
     monkeypatch.setattr(server, "_fetch_page", fake_fetch)
-    content = asyncio.run(server.call_tool("fetch_url", {"url": "https://example.com", "char_limit": 500}))
-    payload = __import__("json").loads(content[0].text)
+    content = run_async(_call_tool("fetch_url", {"url": "https://example.com", "char_limit": 500}))
+    payload = json.loads(content[0].text)
     assert captured == {"url": "https://example.com", "char_limit": 500}
     assert payload["success"] is True
     assert payload["data"]["title"] == "Example"
 
 
 def test_call_tool_fetch_url_rejects_bad_args():
-    payload = __import__("json").loads(
-        asyncio.run(server.call_tool("fetch_url", {"url": ""}))[0].text
+    payload = json.loads(
+        run_async(_call_tool("fetch_url", {"url": ""}))[0].text
     )
     assert payload["success"] is False
     assert "url is required" in payload["error"]
-    payload2 = __import__("json").loads(
-        asyncio.run(server.call_tool("fetch_url", {"url": "https://example.com", "char_limit": 10}))[0].text
+    payload2 = json.loads(
+        run_async(_call_tool("fetch_url", {"url": "https://example.com", "char_limit": 10}))[0].text
     )
     assert payload2["success"] is False
 
@@ -105,8 +199,8 @@ def test_call_tool_returns_single_structured_json_layer(monkeypatch):
         return [{"title": "Hermes", "url": "https://example.com/", "description": "Agent", "position": 1}]
 
     monkeypatch.setattr(server, "_search_google", fake_search)
-    content = asyncio.run(server.call_tool("google_search", {"query": "Hermes Agent", "limit": 2}))
-    payload = __import__("json").loads(content[0].text)
+    content = run_async(_call_tool("google_search", {"query": "Hermes Agent", "limit": 2}))
+    payload = json.loads(content[0].text)
     assert payload == {
         "success": True,
         "data": {"web": [{"title": "Hermes", "url": "https://example.com/", "description": "Agent", "position": 1}]},
@@ -129,6 +223,101 @@ def test_build_results_deduplicates_and_honors_limit():
         {"title": "One", "url": "https://one.example/a", "description": "first", "position": 1},
         {"title": "Two", "url": "https://two.example/b", "description": "second", "position": 2},
     ]
+
+
+def test_fetch_page_serializes_concurrent_calls(monkeypatch):
+    assert isinstance(server._FETCH_LOCK, asyncio.Lock)
+    navigated = []
+    in_section = {"active": 0, "max": 0}
+
+    async def fake_ensure():
+        return "ws://127.0.0.1:1/devtools/browser/x"
+
+    class FakeConn:
+        async def send(self, msg):
+            pass
+
+        async def recv(self):
+            return '{"id": 1, "result": {}}'
+
+        async def close(self):
+            pass
+
+    async def fake_connect(*args, **kwargs):
+        return FakeConn()
+
+    async def fake_cdp(conn, method, params=None):
+        if method == "Target.getTargetInfo":
+            return {"targetInfo": {"targetId": "fetch-tab"}}
+        if method == "Target.createTarget":
+            return {"targetId": "fetch-tab"}
+        if method == "Page.navigate":
+            url = (params or {}).get("url", "")
+            navigated.append(url)
+            in_section["active"] += 1
+            in_section["max"] = max(in_section["max"], in_section["active"])
+            await asyncio.sleep(0.05)
+            in_section["active"] -= 1
+            return {}
+        return {}
+
+    async def fake_evaluate(conn, expr):
+        if "location.href" in expr:
+            return navigated[-1] if navigated else "https://example.com/"
+        return '{"title": "t", "text": "hello"}'
+
+    async def fake_wait(conn):
+        await asyncio.sleep(0.02)
+
+    monkeypatch.setattr(server, "_RUNTIME", server.BrowserRuntime())
+    server._RUNTIME.fetch_target_id = "fetch-tab"
+    server._RUNTIME.port = 1
+    async def fake_to_thread(fn, *a, **k):
+        res = fn(*a, **k)
+        if asyncio.iscoroutine(res):
+            return await res
+        return res
+    monkeypatch.setattr(server.asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(server._RUNTIME, "ensure", fake_ensure)
+    monkeypatch.setattr(server.websockets, "connect", fake_connect)
+    monkeypatch.setattr(server, "_cdp_call", fake_cdp)
+    monkeypatch.setattr(server, "_evaluate", fake_evaluate)
+    monkeypatch.setattr(server, "_wait_ready", fake_wait)
+    monkeypatch.setattr(server, "_validate_public_url", lambda u: u)
+
+    async def run_two():
+        return await asyncio.gather(
+            server._fetch_page("https://one.example/a", 500),
+            server._fetch_page("https://two.example/b", 500),
+        )
+
+    first, second = asyncio.run(run_two())
+    assert {first["url"], second["url"]} == {"https://one.example/a", "https://two.example/b"}
+    assert in_section["max"] == 1
+
+
+def test_display_mode_defaults_to_xvfb(monkeypatch):
+    monkeypatch.delenv("CW_DISPLAY_MODE", raising=False)
+    assert server.BrowserRuntime().display_mode == "xvfb"
+
+
+def test_xephyr_mode_requires_user_display(monkeypatch):
+    monkeypatch.setenv("CW_DISPLAY_MODE", "xephyr")
+    runtime = server.BrowserRuntime()
+    runtime.user_display = None
+    try:
+        runtime.ensure()
+    except RuntimeError as exc:
+        assert "xephyr" in str(exc).lower()
+    else:
+        raise AssertionError("xephyr without DISPLAY should fail")
+
+
+def test_xpra_expose_is_opt_in(monkeypatch):
+    monkeypatch.delenv("CW_XPRA_EXPOSE", raising=False)
+    assert server._xpra_expose_enabled() is False
+    monkeypatch.setenv("CW_XPRA_EXPOSE", "1")
+    assert server._xpra_expose_enabled() is True
 
 
 def test_live_google_search_returns_real_external_results():
