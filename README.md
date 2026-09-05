@@ -168,7 +168,16 @@ docker run -i --rm -e DISPLAY=$DISPLAY -e CW_DISPLAY_MODE=xephyr \
   -v /tmp/.X11-unix:/tmp/.X11-unix chrome-web-mcp
 ```
 
-Image size is about 1.4 GB (mostly Chromium and fonts).
+Image size is about 1.5 GB (mostly Chromium and fonts).
+
+## Install size (rough, Debian host)
+
+- Python environment (`.venv`, incl. trafilatura/html2text): ~100 MB
+- This package source: under 1 MB
+- Chromium set: ~485 MB
+- Xvfb + x11-utils: ~5 MB
+- Total: ~600 MB, dominated by Chromium. No new system packages were added
+  for markdown shaping (pure-Python dependencies only).
 
 ## Tools
 
