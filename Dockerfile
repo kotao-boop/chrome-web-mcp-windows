@@ -16,7 +16,7 @@ ARG DEBIAN_FRONTEND
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       python3 python3-venv \
-      chromium xvfb xserver-xephyr xdotool wmctrl \
+      chromium xvfb xserver-xephyr xdotool wmctrl x11-utils \
       fonts-liberation fonts-noto-cjk \
       sqlite3 ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
