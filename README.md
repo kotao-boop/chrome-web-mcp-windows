@@ -18,6 +18,68 @@ stdio command. It does not depend on Hermes Agent.
 The Python dependencies are installed with the package. Chrome and Xvfb remain
 host prerequisites because they are external browser processes.
 
+Non-headless Chrome on Xvfb is intentional: `--headless` is easier to
+bot-detect, so Xvfb is kept as a requirement even though it is heavier.
+
+## Linux quickstart (Debian/Ubuntu, copy-paste)
+
+```bash
+# 1. System dependencies (headless xvfb mode needs only these two)
+sudo apt update && sudo apt install -y chromium xvfb
+which chromium || which google-chrome || which chromium-browser
+which Xvfb
+python3 --version  # 3.10+
+
+# Optional: visible-window mode only
+# sudo apt install -y xserver-xephyr
+
+# 2. Install the package (either one)
+python3 -m pip install -e '.'
+# or: python -m pip install chrome_web_mcp-0.2.0-py3-none-any.whl
+```
+
+MCP handshake check (`TOOLS: ['google_search', 'fetch_url']` expected):
+
+```bash
+uv run python -c "
+import asyncio
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+async def main():
+    params = StdioServerParameters(command='uv', args=['run','--directory','/absolute/path/to/chrome-web-mcp','chrome-web-mcp'])
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            print('TOOLS:', [t.name for t in (await session.list_tools()).tools])
+asyncio.run(main())
+"
+```
+
+opencode (`~/.config/opencode/opencode.json`, Linux path example):
+
+```json
+{
+  "mcp": {
+    "chrome-web": {
+      "type": "local",
+      "command": ["uv", "run", "--directory", "/home/user/projects/chrome-web-mcp", "chrome-web-mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+Notes:
+
+- Replace `/absolute/path/to/chrome-web-mcp` with your checkout path.
+- `CW_CHROME=/usr/bin/chromium` only if auto-detection misses your binary.
+- Call `google_search` and `fetch_url` sequentially, not in parallel:
+  parallel calls from one server process can hit the profile lock
+  (`Another chrome-web MCP instance owns this profile`).
+- `xephyr` mode needs a real desktop `DISPLAY` plus `xserver-xephyr`;
+  on a headless host or over SSH without X forwarding it will not start.
+  Default `xvfb` mode needs no `DISPLAY`.
+
 ## Install and run
 
 From a built wheel:
