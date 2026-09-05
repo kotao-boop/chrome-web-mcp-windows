@@ -199,14 +199,14 @@ def test_call_tool_returns_single_structured_json_layer(monkeypatch):
     async def fake_search(query, limit, hl="ja", gl="jp"):
         assert query == "Hermes Agent"
         assert limit == 2
-        return [{"title": "Hermes", "url": "https://example.com/", "description": "Agent", "position": 1}], 0.0
+        return [{"title": "Hermes", "url": "https://example.com/", "description": "Agent", "position": 1}], 0.0, None
 
     monkeypatch.setattr(server, "_search_google", fake_search)
     content = run_async(_call_tool("google_search", {"query": "Hermes Agent", "limit": 2}))
     payload = json.loads(content[0].text)
     assert payload == {
         "success": True,
-        "data": {"web": [{"title": "Hermes", "url": "https://example.com/", "description": "Agent", "position": 1}], "waited_ms": 0},
+        "data": {"web": [{"title": "Hermes", "url": "https://example.com/", "description": "Agent", "position": 1}], "waited_ms": 0, "pace_warning": None},
     }
 
 
@@ -295,6 +295,7 @@ def test_fetch_page_runs_concurrent_calls_on_separate_tabs(monkeypatch):
     monkeypatch.setattr(server.websockets, "connect", fake_connect)
     monkeypatch.setattr(server, "_cdp_call", fake_cdp)
     monkeypatch.setattr(server, "_evaluate", fake_evaluate)
+    monkeypatch.setattr(server, "_read_page_string", fake_evaluate)
     monkeypatch.setattr(server, "_wait_ready", fake_wait)
     monkeypatch.setattr(server, "_validate_public_url", lambda u: u)
 
@@ -336,8 +337,14 @@ def test_xpra_expose_is_opt_in(monkeypatch):
     assert server._xpra_expose_enabled() is True
 
 
+@pytest.mark.live
 def test_live_google_search_returns_real_external_results():
-    results, waited_ms = asyncio.run(server._search_google("Hermes Agent Nous Research", 3))
+    try:
+        results, waited_ms, pace = asyncio.run(server._search_google("Hermes Agent Nous Research", 3))
+    except server.CaptchaRequired:
+        pytest.skip("Google requires human CAPTCHA; challenge handling is tested separately")
+    finally:
+        server._RUNTIME.cleanup()
     assert isinstance(waited_ms, float)
     assert len(results) == 3
     assert [item["position"] for item in results] == [1, 2, 3]
@@ -358,6 +365,15 @@ def test_smart_cut_prefers_sentence_boundary():
     assert cut == "First sentence."
 
 
+def test_pace_warning_fires_after_burst():
+    server._SEARCH_TIMES.clear()
+    for _ in range(14):
+        assert server._pace_warning(server._note_search_start()) is None
+    assert "slow down" in (server._pace_warning(server._note_search_start()) or "")
+    assert server._peek_search_count() == 15
+    server._SEARCH_TIMES.clear()
+
+
 def test_call_tool_google_search_rejects_bad_hl_gl():
     payload = json.loads(
         run_async(_call_tool("google_search", {"query": "x", "hl": "!!"}))[0].text
@@ -374,7 +390,8 @@ def test_call_tool_fetch_url_rejects_bad_format():
     assert "format" in payload["error"]
 
 
-def test_health_check_reports_status():
+def test_health_check_reports_status(monkeypatch):
+    monkeypatch.setattr(server, "_LAST_CAPTCHA_TS", None)
     payload = json.loads(run_async(_call_tool("health_check", {}))[0].text)
     assert payload["success"] is True
     data = payload["data"]

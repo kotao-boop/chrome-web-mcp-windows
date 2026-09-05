@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import collections
 import fcntl
 import ipaddress
 import itertools
@@ -35,6 +36,7 @@ import mcp.types as types
 import websockets
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
+from chrome_web_mcp.network import PublicNetworkProxy
 
 try:
     import trafilatura
@@ -62,6 +64,7 @@ PROFILE_DIR = (
 LOCK_PATH = Path(os.environ["CW_LOCK_PATH"]) if os.environ.get("CW_LOCK_PATH") else PROFILE_DIR / ".instance.lock"
 DEVTOOLS_FILE = PROFILE_DIR / "DevToolsActivePort"
 MAX_CDP_MESSAGE = 2 * 1024 * 1024
+MAX_EXTRACTION_CHARS = 16 * 1024 * 1024
 
 app = Server("chrome-web")
 
@@ -223,6 +226,34 @@ def _terminate_owned_process(proc: subprocess.Popen | None, timeout: float) -> N
             pass
 
 
+def _process_identity(pid: int) -> dict:
+    """Identify a process without relying on a reusable PID alone (Linux)."""
+    proc_path = Path(f"/proc/{pid}")
+    if proc_path.stat().st_uid != os.getuid():
+        raise ValueError("Process is owned by another user")
+    stat = (proc_path / "stat").read_text()
+    fields = stat[stat.rfind(")") + 2:].split()
+    return {"pid": pid, "start_ticks": fields[19]}
+
+
+def _stop_recorded_process(record: dict) -> None:
+    """Stop only a same-user process group whose leader identity still matches."""
+    try:
+        pid = int(record["pid"])
+        if pid <= 1 or _process_identity(pid) != record or os.getpgid(pid) != pid:
+            return
+        os.killpg(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if _process_identity(pid) != record:
+                return
+            time.sleep(0.05)
+        if _process_identity(pid) == record:
+            os.killpg(pid, signal.SIGKILL)
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
+        return
+
+
 class BrowserRuntime:
     """Own one isolated Xvfb/Chrome pair for this MCP process."""
 
@@ -234,6 +265,7 @@ class BrowserRuntime:
         self.display: str | None = None
         self.port: int | None = None
         self.browser_ws: str | None = None
+        self.proxy: PublicNetworkProxy | None = None
         self.xpra_server: subprocess.Popen | None = None
         self.xpra_client: subprocess.Popen | None = None
         self.user_display = os.environ.get("DISPLAY")
@@ -408,7 +440,7 @@ class BrowserRuntime:
         """
         if self.lock_file is not None:
             return
-        LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LOCK_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         start = time.monotonic()
         while True:
             lock_file = LOCK_PATH.open("a+")
@@ -478,7 +510,12 @@ class BrowserRuntime:
         if not base.is_dir():
             return
         for entry in base.iterdir():
-            if not entry.is_dir():
+            try:
+                eligible = not entry.is_symlink() and entry.is_dir() and entry.stat().st_uid == os.getuid()
+            except OSError:
+                # Another starting server may already have reaped this entry.
+                continue
+            if not eligible:
                 continue
             try:
                 pid = int(entry.name)
@@ -489,16 +526,28 @@ class BrowserRuntime:
             try:
                 os.kill(pid, 0)
             except ProcessLookupError:
-                # Owner dead: sweep orphaned browsers pointing at this profile.
+                # New profiles record Chrome AND the private display, including
+                # start ticks to avoid terminating an unrelated reused PID.
                 try:
-                    subprocess.run(
-                        ["pkill", "-f", f"--user-data-dir={entry}"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=10,
-                    )
-                except (OSError, subprocess.TimeoutExpired):
+                    records = json.loads((entry / ".owned-processes.json").read_text())
+                    if isinstance(records, list):
+                        for record in records:
+                            if isinstance(record, dict):
+                                _stop_recorded_process(record)
+                except (OSError, ValueError):
                     pass
+                # Upgrade path for old profiles: exact argv matching, never
+                # pkill regexes or option-like patterns. Old Xvfb cannot be
+                # safely identified without a manifest, so leave it alone.
+                for proc_path in Path("/proc").iterdir():
+                    if not proc_path.name.isdigit():
+                        continue
+                    try:
+                        args = (proc_path / "cmdline").read_bytes().split(b"\0")
+                        if os.fsencode(f"--user-data-dir={entry}") in args:
+                            _stop_recorded_process(_process_identity(int(proc_path.name)))
+                    except (OSError, ValueError, IndexError):
+                        pass
                 try:
                     shutil.rmtree(entry, ignore_errors=True)
                 except OSError:
@@ -506,6 +555,18 @@ class BrowserRuntime:
             except OSError:
                 # EPERM: owner alive (or a kernel pid we cannot signal) — keep it.
                 pass
+
+    def _record_processes(self) -> None:
+        if self.lock_file is None:
+            return
+        PROFILE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        records = []
+        for proc in (self.chrome, self.xephyr, self.xvfb):
+            if proc is not None and proc.poll() is None:
+                records.append(_process_identity(proc.pid))
+        pending = PROFILE_DIR / ".owned-processes.tmp"
+        pending.write_text(json.dumps(records))
+        pending.replace(PROFILE_DIR / ".owned-processes.json")
 
     def _start_xvfb(self) -> str:
         proc = subprocess.Popen(
@@ -516,6 +577,7 @@ class BrowserRuntime:
             start_new_session=True,
         )
         self.xvfb = proc
+        self._record_processes()
         assert proc.stdout is not None
         ready, _, _ = select.select([proc.stdout], [], [], 10)
         if not ready:
@@ -585,6 +647,7 @@ class BrowserRuntime:
             _terminate_owned_process(minimizer, 2)
             raise
         self.xephyr = proc
+        self._record_processes()
         assert proc.stdout is not None
         ready, _, _ = select.select([proc.stdout], [], [], 10)
         if not ready:
@@ -622,11 +685,17 @@ class BrowserRuntime:
         PROFILE_DIR.mkdir(parents=True, exist_ok=True)
         DEVTOOLS_FILE.unlink(missing_ok=True)
         env = self._browser_environment(display)
+        if self.proxy is None:
+            raise RuntimeError("Public-network proxy is not ready")
         command = [
             self._chrome_executable(),
             "--ozone-platform=x11",
             "--remote-debugging-address=127.0.0.1",
             "--remote-debugging-port=0",
+            f"--proxy-server={self.proxy.url}",
+            "--proxy-bypass-list=<-loopback>",
+            "--disable-quic",
+            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
             f"--user-data-dir={PROFILE_DIR}",
             "--no-first-run",
             "--no-default-browser-check",
@@ -651,6 +720,7 @@ class BrowserRuntime:
             start_new_session=True,
         )
         self.chrome = proc
+        self._record_processes()
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
             if proc.poll() is not None:
@@ -670,6 +740,7 @@ class BrowserRuntime:
         self.cleanup()
         self._acquire_lock()
         try:
+            self.proxy = PublicNetworkProxy()
             if self.display_mode == "xephyr":
                 if not self.user_display:
                     raise RuntimeError(
@@ -695,9 +766,18 @@ class BrowserRuntime:
         self.display = None
         self.port = None
         self.browser_ws = None
-        DEVTOOLS_FILE.unlink(missing_ok=True)
+        self.search_target_id = None
+        self.fetch_target_id = None
+        if self.proxy is not None:
+            self.proxy.close()
+            self.proxy = None
         if self.lock_file is not None:
             try:
+                DEVTOOLS_FILE.unlink(missing_ok=True)
+                (PROFILE_DIR / ".owned-processes.json").unlink(missing_ok=True)
+                if not os.environ.get("CW_PROFILE_DIR"):
+                    # SIGTERM uses os._exit, so atexit alone cannot remove it.
+                    shutil.rmtree(PROFILE_DIR, ignore_errors=True)
                 fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_UN)
             finally:
                 self.lock_file.close()
@@ -789,6 +869,36 @@ _SEARCH_LIMITER = SharedSearchRateLimiter()
 _ENSURE_LOCK = asyncio.Lock()
 # Last time Google served a CAPTCHA (epoch seconds), for health_check.
 _LAST_CAPTCHA_TS: float | None = None
+# Sliding window of recent search starts, for burst warnings to agents.
+_PACE_WINDOW_S = 60.0
+_PACE_WARN_N = 15
+_SEARCH_TIMES: collections.deque[float] = collections.deque()
+
+
+def _note_search_start() -> int:
+    """Record a search start; return starts within the pace window."""
+    now = time.monotonic()
+    _SEARCH_TIMES.append(now)
+    while _SEARCH_TIMES and _SEARCH_TIMES[0] <= now - _PACE_WINDOW_S:
+        _SEARCH_TIMES.popleft()
+    return len(_SEARCH_TIMES)
+
+
+def _peek_search_count() -> int:
+    """Count starts within the pace window without recording."""
+    now = time.monotonic()
+    while _SEARCH_TIMES and _SEARCH_TIMES[0] <= now - _PACE_WINDOW_S:
+        _SEARCH_TIMES.popleft()
+    return len(_SEARCH_TIMES)
+
+
+def _pace_warning(count: int) -> str | None:
+    if count >= _PACE_WARN_N:
+        return (
+            f"{count} searches in the last 60s; slow down or batch queries "
+            "to avoid a Google CAPTCHA"
+        )
+    return None
 
 
 async def _cdp_call(connection: Any, method: str, params: dict | None = None) -> dict:
@@ -813,6 +923,37 @@ async def _evaluate(connection: Any, expression: str) -> Any:
     if remote.get("subtype") == "error" or "exceptionDetails" in result:
         raise RuntimeError("JavaScript evaluation failed")
     return remote.get("value")
+
+
+async def _read_page_string(connection: Any, expression: str) -> str:
+    """Read a snapshot in bounded CDP messages, including large HTML/text pages."""
+    result = await _cdp_call(connection, "Runtime.evaluate", {
+        "expression": "({text: String(" + expression + ")})",
+        "returnByValue": False,
+    })
+    object_id = result.get("result", {}).get("objectId")
+    if not object_id or "exceptionDetails" in result:
+        raise RuntimeError("Could not snapshot rendered content")
+    async def call(function: str, arguments: list) -> Any:
+        answer = await _cdp_call(connection, "Runtime.callFunctionOn", {
+            "objectId": object_id, "functionDeclaration": function,
+            "arguments": [{"value": value} for value in arguments],
+            "returnByValue": True,
+        })
+        if "exceptionDetails" in answer:
+            raise RuntimeError("Could not read rendered content")
+        return answer.get("result", {}).get("value")
+    try:
+        length = await call("function(){return this.text.length}", [])
+        if not isinstance(length, int) or length > MAX_EXTRACTION_CHARS:
+            raise RuntimeError("Rendered content exceeds the 16Mi character extraction limit")
+        chunks = []
+        for start in range(0, length, 65536):
+            chunks.append(await call("function(a,b){return this.text.slice(a,b)}", [start, start + 65536]))
+        # Chunk boundaries can split a UTF-16 surrogate pair.
+        return "".join(chunks).encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+    finally:
+        await _cdp_call(connection, "Runtime.releaseObject", {"objectId": object_id})
 
 
 async def _wait_ready(connection: Any) -> None:
@@ -972,7 +1113,7 @@ async def _extract_google_candidates(
             else:
                 detail = _captcha_detail_for_mode()
             raise CaptchaRequired(detail)
-        raw = await _evaluate(page, _EXTRACT_RESULTS_JS)
+        raw = await _read_page_string(page, _EXTRACT_RESULTS_JS)
         candidates = json.loads(raw or "[]")
         if not isinstance(candidates, list):
             raise RuntimeError("Google result extraction returned an invalid payload")
@@ -1003,21 +1144,23 @@ def _captcha_detail_for_mode() -> str:
 
 async def _search_google(
     query: str, limit: int, hl: str = "ja", gl: str = "jp"
-) -> tuple[list[dict], float]:
+) -> tuple[list[dict], float, str | None]:
     """Run one Google search with process-wide pacing and a shared slot queue.
 
-    Returns (results, waited_seconds) so callers can expose queue waits.
+    Returns (results, waited_seconds, pace_warning) so callers can expose
+    queue waits and burst warnings.
     """
     async with _SEARCH_LOCK:
         wait_for = await asyncio.to_thread(_SEARCH_LIMITER.reserve_slot)
         if wait_for:
             await asyncio.sleep(wait_for)
+        pace_count = _note_search_start()
         candidates = await _extract_google_candidates(query, limit, hl, gl)
     results = await _build_results(candidates, limit, resolve_url=_resolve_candidate_url)
     if not results:
         raise RuntimeError("Google rendered no usable external search results")
     await asyncio.to_thread(_RUNTIME.hide_for_human)
-    return results, wait_for
+    return results, wait_for, _pace_warning(pace_count)
 
 
 # Extract clean, readable text from a rendered page (no scripts/styles/nav).
@@ -1136,8 +1279,9 @@ async def _fetch_page(url: str, char_limit: int, format: str = "text") -> dict:
 
     Each call gets its own tab (created and closed here), so concurrent fetches
     are parallel-safe. The requested URL and its post-redirect final URL are
-    both validated as public HTTP(S) (fail-closed), blocking
-    localhost/metadata/secret-bearing destinations and redirect-based SSRF.
+    both validated as public HTTP(S). The browser's mandatory public-network
+    proxy blocks non-public connections before sending any upstream bytes,
+    including redirects, subresources, WebSockets, and DNS rebinding.
     """
     # Validate the requested URL up front (fail-closed).
     validated = _validate_public_url(url)
@@ -1163,7 +1307,7 @@ async def _fetch_page(url: str, char_limit: int, format: str = "text") -> dict:
         await _cdp_call(page, "Runtime.enable")
         await _cdp_call(page, "Page.navigate", {"url": validated})
         await _wait_ready(page)
-        # Re-validate the final URL after redirects (catch public->local SSRF).
+        # Output policy; the proxy enforces network policy before connection.
         final_url = str(await _evaluate(page, "location.href"))
         _validate_public_url(final_url)
         payload: dict = {
@@ -1173,7 +1317,7 @@ async def _fetch_page(url: str, char_limit: int, format: str = "text") -> dict:
             "redirected": validated != final_url,
         }
         if format == "text":
-            raw = await _evaluate(page, _FETCH_TEXT_JS)
+            raw = await _read_page_string(page, _FETCH_TEXT_JS)
             data = json.loads(raw or "{}")
             full = " ".join(str(data.get("text", "")).split())
             title = " ".join(str(data.get("title", "")).split())
@@ -1190,13 +1334,13 @@ async def _fetch_page(url: str, char_limit: int, format: str = "text") -> dict:
             )
         else:
             html = str(
-                await _evaluate(
+                await _read_page_string(
                     page,
                     "document.documentElement ? document.documentElement.outerHTML : ''",
                 )
             )
             shaped, method = await asyncio.to_thread(_shape_markdown, html, final_url)
-            links_raw = await _evaluate(page, _FETCH_LINKS_JS)
+            links_raw = await _read_page_string(page, _FETCH_LINKS_JS)
             try:
                 links = json.loads(links_raw or "[]")
             except (ValueError, TypeError):
@@ -1206,7 +1350,7 @@ async def _fetch_page(url: str, char_limit: int, format: str = "text") -> dict:
             if not shaped:
                 # Shaper saw nothing usable: fall back to the in-page DOM walk
                 # so the agent still gets something (extraction says "dom").
-                raw = await _evaluate(page, _FETCH_MD_JS)
+                raw = await _read_page_string(page, _FETCH_MD_JS)
                 try:
                     data = json.loads(raw or "{}")
                 except (ValueError, TypeError):
@@ -1262,7 +1406,8 @@ async def list_tools() -> list[types.Tool]:
                 "Search Google in a JavaScript-rendering Chrome browser running "
                 "non-headless inside Xvfb. Returns structured search results. "
                 "Workflow: first google_search, then fetch_url on interesting "
-                "result URLs for full text."
+                "result URLs for full text. Pace calls: bursts of 15+ searches "
+                "per minute raise a pace_warning and risk a Google CAPTCHA."
             ),
             inputSchema={
                 "type": "object",
@@ -1362,6 +1507,7 @@ def _health_status() -> dict:
             queue_wait_s = max(0.0, float(row[0]) - time.time())
     except Exception:
         queue_wait_s = -1.0
+    pace_count = _peek_search_count()
     return {
         "display_mode": _RUNTIME.display_mode,
         "chrome_alive": chrome_alive,
@@ -1370,6 +1516,8 @@ def _health_status() -> dict:
         "rate_limiter_queue_wait_s": round(queue_wait_s, 3),
         "rate_limit_min_delay_s": _SEARCH_LIMITER.min_delay,
         "rate_limit_max_delay_s": _SEARCH_LIMITER.max_delay,
+        "recent_searches_60s": pace_count,
+        "pace_warning": _pace_warning(pace_count),
         "last_captcha_at": (
             time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(_LAST_CAPTCHA_TS))
             if _LAST_CAPTCHA_TS
@@ -1395,10 +1543,14 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             for label, value in (("hl", hl), ("gl", gl)):
                 if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z-]{2,8}", value.strip()):
                     raise ValueError(f"{label} must be a 2-8 letter language/region code")
-            results, waited = await _search_google(query.strip(), limit, hl.strip(), gl.strip())
+            results, waited, pace = await _search_google(query.strip(), limit, hl.strip(), gl.strip())
             payload = {
                 "success": True,
-                "data": {"web": results, "waited_ms": int(waited * 1000)},
+                "data": {
+                    "web": results,
+                    "waited_ms": int(waited * 1000),
+                    "pace_warning": pace,
+                },
             }
         elif name == "fetch_url":
             url = arguments.get("url", "")
