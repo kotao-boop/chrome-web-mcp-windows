@@ -8,6 +8,21 @@ A stdio Model Context Protocol server that exposes two focused browser tools:
 The server is designed to be configured by any MCP client that can launch a
 stdio command. It does not depend on Hermes Agent.
 
+## Features
+
+- JS-rendered Google search + public URL fetch through a real (non-headless)
+  Chrome on a private Xvfb display — harder to bot-detect than `--headless`.
+- Shaped markdown by default (`trafilatura` + `html2text`, pure-Python, no
+  extra service), with full-text fallback and follow-up link targets.
+- Language/region hints (`hl`/`gl`) for reproducible JA/EN results.
+- Parallel-safe: concurrent searches and fetches serialize only where the
+  browser lifecycle requires it; each fetch uses its own tab.
+- Fail-closed fetching: private networks, metadata hosts, and
+  credential-bearing URLs are blocked, including post-redirect targets.
+- Shared SQLite pacing for Google searches across MCP processes.
+- `health_check` for display/browser/queue/CAPTCHA observability.
+- Linux only (Xvfb/Xephyr, `fcntl`, process groups).
+
 ## Requirements
 
 - Python 3.10 or newer
@@ -196,6 +211,8 @@ Input:
 with `title`, `url`, `description`, and `position` fields, plus `waited_ms`
 (the shared rate-limiter queue wait). `hl`/`gl` are optional Google language
 (`ja`/`en`) and region (`jp`/`us`) hints; defaults preserve Japanese results.
+`query` is required, max 512 chars. Searches run one at a time per process
+and are paced across processes (see Runtime configuration).
 
 ### `fetch_url`
 
@@ -217,7 +234,9 @@ sentence boundary when possible. Returns `requested_url`, `final_url`,
 and the `extraction` method, so agents can tell it was shaped — if content
 looks missing, retry with `format: "text"` for the full rendered text.
 `format: "links"` adds follow-up link targets. Concurrent fetches are
-parallel-safe; each uses its own tab. This shaping reuses the same
+parallel-safe; each uses its own tab. `url` is required, max 2048 chars.
+Failures return `{"success": false, "error": "..."}` (plus
+`"captcha_required": true` for Google challenges). This shaping reuses the same
 `trafilatura` + `html2text` approach as a self-hosted jina-compatible Reader,
 without needing the extra service.
 
