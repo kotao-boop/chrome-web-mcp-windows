@@ -1,5 +1,26 @@
 # chrome-web-mcp
 
+> [!CAUTION]
+> Single-session use only: one client process, one browser, sequential searches.
+>
+> - Normal use never trips the limiter: `pace_warning` fires only at 15+
+>   searches per minute. Sequential or lightly-parallel use stays far below it.
+> - A warning is advisory, not a block: searches keep running. But Google
+>   counts total volume too — sustained barrages end in CAPTCHA regardless of
+>   pacing (observed after dozens of searches in one session). When challenged:
+>   wait a few minutes and retry in headless (`xvfb`) mode — it usually clears
+>   by itself; in visible (`xephyr`) mode, solve the challenge in the
+>   `chrome-web-mcp` window yourself, then retry. `last_captcha_at` in
+>   `health_check` shows the last hit.
+> - opencode + subagents: SAFE. All agents share one server process and one
+>   browser. Concurrent searches are pooled in a shared query queue
+>   (per-process lock + SQLite pacing) and executed sequentially — verified
+>   with 3 simultaneous subagents and 35 rapid searches, no CAPTCHA.
+> - Separate processes at once are NOT absorbed: each process spawns its OWN
+>   browser, so parallel CLIs look like fresh users hitting Google together.
+>   Each one can be CAPTCHA-challenged independently (observed). Stagger starts
+>   by seconds or raise `CW_MIN_DELAY` / `CW_MAX_DELAY`.
+
 A stdio Model Context Protocol server that exposes focused browser tools:
 
 - `google_search` — Google search through a JavaScript-rendered Chrome instance.
