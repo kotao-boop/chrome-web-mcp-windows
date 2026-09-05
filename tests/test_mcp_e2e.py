@@ -118,7 +118,7 @@ def test_sigterm_with_browser_exits_fast_and_no_orphans():
     c.handshake()
     tools = c.rpc("tools/list")
     names = sorted(t["name"] for t in tools["tools"])
-    assert names == ["fetch_url", "google_search"]
+    assert names == ["fetch_url", "google_search", "health_check"]
     res = c.rpc("tools/call", {"name": "google_search", "arguments": {"query": "Hermes Agent", "limit": 2}})
     payload = json.loads(res["content"][0]["text"])
     assert payload["success"] is True

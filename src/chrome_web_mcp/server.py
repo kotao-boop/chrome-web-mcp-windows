@@ -237,8 +237,9 @@ class BrowserRuntime:
         # A long-lived background search tab, reused across queries so we do not
         # repeatedly open/close targets (which looks like bot activity to Google).
         self.search_target_id: str | None = None
-        # Separate long-lived tab for arbitrary URL fetches, so a fetch does not
-        # steal the Google search tab mid-query.
+        # Fetch calls use per-call tabs (created and closed per request), so a
+        # fetch never steals the Google search tab and concurrent fetches are
+        # parallel-safe.
         self.fetch_target_id: str | None = None
 
     # Fingerprint hardening, injected into every new document before scripts run.
@@ -694,6 +695,17 @@ class BrowserRuntime:
                 self.lock_file = None
 
 
+def _env_float(name: str, default: float) -> float:
+    """Read a float env override, falling back to default on unset/invalid."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 class SharedSearchRateLimiter:
     """Reserve globally spaced Google-search start slots across processes."""
 
@@ -703,9 +715,13 @@ class SharedSearchRateLimiter:
         self,
         db_path: str | Path | None = None,
         *,
-        min_delay: float = 1.0,
-        max_delay: float = 2.5,
+        min_delay: float | None = None,
+        max_delay: float | None = None,
     ) -> None:
+        if min_delay is None:
+            min_delay = _env_float("CW_MIN_DELAY", 1.0)
+        if max_delay is None:
+            max_delay = _env_float("CW_MAX_DELAY", 2.5)
         if min_delay < 0 or max_delay < min_delay:
             raise ValueError("invalid search rate-limit delay range")
         default_path = Path(tempfile.gettempdir()) / "chrome-web-mcp" / "search-rate-limit.sqlite3"
@@ -758,15 +774,12 @@ BrowserRuntime._sweep_orphans()
 # Serialize searches within this process and reserve a shared inter-process slot.
 _SEARCH_LOCK = asyncio.Lock()
 _SEARCH_LIMITER = SharedSearchRateLimiter()
-# Serialize fetches within this process: _fetch_page reuses a single long-lived
-# fetch tab (separate from the search tab), so two concurrent fetches would
-# navigate the SAME target and the second URL overwrites the first before the
-# first read happens (both callers then return the winner's content).
-_FETCH_LOCK = asyncio.Lock()
 # Serialize browser lifecycle (ensure/cleanup/lock) across search AND fetch:
 # ensure() is blocking and not reentrant, so a search racing a fetch would
 # cleanup() the other's starting browser and then fail on the profile lock.
 _ENSURE_LOCK = asyncio.Lock()
+# Last time Google served a CAPTCHA (epoch seconds), for health_check.
+_LAST_CAPTCHA_TS: float | None = None
 
 
 async def _cdp_call(connection: Any, method: str, params: dict | None = None) -> dict:
@@ -850,11 +863,11 @@ _EXTRACT_RESULTS_JS = r"""(() => {
 
 
 async def _ensure_reused_tab(browser: Any, which: str) -> Any:
-    """Return a connected page socket for a long-lived search/fetch tab.
+    """Return a connected page socket for the long-lived search tab.
 
     Reuses the existing target when it is still alive, otherwise creates a
-    background tab. Both search and fetch share this so their target handling
-    cannot drift apart.
+    background tab. Fetch calls use per-call tabs instead, so concurrent
+    fetches never share a navigation target.
     """
     attr = "search_target_id" if which == "search" else "fetch_target_id"
     target_id = getattr(_RUNTIME, attr)
@@ -899,7 +912,9 @@ async def _ensure_search_page(browser: Any) -> tuple[Any, str, bool]:
     return page, current, previous != current
 
 
-async def _extract_google_candidates(query: str, limit: int) -> list[dict]:
+async def _extract_google_candidates(
+    query: str, limit: int, hl: str = "ja", gl: str = "jp"
+) -> list[dict]:
     async with _ENSURE_LOCK:
         browser_ws = await asyncio.to_thread(_RUNTIME.ensure)
     browser = await websockets.connect(browser_ws, max_size=MAX_CDP_MESSAGE)
@@ -925,7 +940,7 @@ async def _extract_google_candidates(query: str, limit: int) -> list[dict]:
         except Exception:
             pass
         search_url = "https://www.google.com/search?" + urllib.parse.urlencode(
-            {"q": query, "num": min(max(limit + 5, 10), 25), "udm": "14"}
+            {"q": query, "num": min(max(limit + 5, 10), 25), "udm": "14", "hl": hl, "gl": gl}
         )
         await _cdp_call(page, "Page.navigate", {"url": search_url})
         await _wait_ready(page)
@@ -937,6 +952,8 @@ async def _extract_google_candidates(query: str, limit: int) -> list[dict]:
             raise RuntimeError("Google navigation left the allowed origin")
         body_text = str(await _evaluate(page, "document.body?.innerText || ''"))
         if _is_google_challenge(final_url, body_text):
+            global _LAST_CAPTCHA_TS
+            _LAST_CAPTCHA_TS = time.time()
             if _xpra_expose_enabled():
                 try:
                     await asyncio.to_thread(_RUNTIME.expose_for_human)
@@ -975,18 +992,23 @@ def _captcha_detail_for_mode() -> str:
     return "Google CAPTCHA detected. Wait a while, then retry the same search."
 
 
-async def _search_google(query: str, limit: int) -> list[dict]:
-    """Run one Google search with process-wide pacing and a shared slot queue."""
+async def _search_google(
+    query: str, limit: int, hl: str = "ja", gl: str = "jp"
+) -> tuple[list[dict], float]:
+    """Run one Google search with process-wide pacing and a shared slot queue.
+
+    Returns (results, waited_seconds) so callers can expose queue waits.
+    """
     async with _SEARCH_LOCK:
         wait_for = await asyncio.to_thread(_SEARCH_LIMITER.reserve_slot)
         if wait_for:
             await asyncio.sleep(wait_for)
-        candidates = await _extract_google_candidates(query, limit)
+        candidates = await _extract_google_candidates(query, limit, hl, gl)
     results = await _build_results(candidates, limit, resolve_url=_resolve_candidate_url)
     if not results:
         raise RuntimeError("Google rendered no usable external search results")
     await asyncio.to_thread(_RUNTIME.hide_for_human)
-    return results
+    return results, wait_for
 
 
 # Extract clean, readable text from a rendered page (no scripts/styles/nav).
@@ -996,53 +1018,153 @@ _FETCH_TEXT_JS = r"""(() => {
     clone.querySelectorAll(sel).forEach(el => el.remove());
   }
   const title = (document.title || '').trim();
-  const text = (clone.innerText || '').replace(/\u00a0/g, ' ');
+  const text = (clone.innerText || '').replace(/ /g, ' ');
   return JSON.stringify({title, text});
 })()"""
 
 
-async def _fetch_page(url: str, char_limit: int) -> dict:
-    """Render a public URL in a dedicated tab and return its readable text.
+# Extract lightweight markdown (headings/paragraphs/lists) plus page links.
+_FETCH_MD_JS = r"""(() => {
+  const clean = v => (v || '').replace(/\s+/g, ' ').trim();
+  const title = (document.title || '').trim();
+  const links = [];
+  for (const a of document.querySelectorAll('a[href]')) {
+    const t = clean(a.innerText || a.textContent);
+    let h = '';
+    try { h = new URL(a.href, location.href).href; } catch (e) { continue; }
+    if (!/^https?:\/\//i.test(h)) continue;
+    if (t) links.push({text: t.slice(0, 200), url: h});
+    if (links.length >= 200) break;
+  }
+  const parts = [];
+  for (const el of document.querySelectorAll('h1,h2,h3,p,li,pre')) {
+    if (!el.isConnected) continue;
+    const t = clean(el.innerText || el.textContent);
+    if (!t) continue;
+    const tag = el.tagName;
+    if (tag === 'H1') parts.push('# ' + t);
+    else if (tag === 'H2') parts.push('## ' + t);
+    else if (tag === 'H3') parts.push('### ' + t);
+    else if (tag === 'LI') parts.push('- ' + t);
+    else if (tag === 'PRE') parts.push('```\n' + t.slice(0, 2000) + '\n```');
+    else parts.push(t);
+    if (parts.join('\n\n').length > 300000) break;
+  }
+  let markdown = parts.join('\n\n');
+  if (!markdown) markdown = clean(document.body ? document.body.innerText : '');
+  return JSON.stringify({title, markdown, links});
+})()"""
 
-    Uses a separate long-lived tab from the Google search tab. The navigation
-    target and its post-redirect final URL are both validated as public HTTP(S)
-    (fail-closed), blocking localhost/metadata/secret-bearing destinations and
-    redirect-based SSRF.
+
+def _smart_cut(text: str, limit: int) -> tuple[str, bool]:
+    """Cut text at a sentence/word boundary; return (cut, truncated)."""
+    if len(text) <= limit:
+        return text, False
+    window = text[:limit]
+    boundary = -1
+    for match in re.finditer(r"[。.!?！？]", window):
+        boundary = match.end()
+    if boundary > limit * 0.5:
+        return window[:boundary].rstrip(), True
+    space = window.rfind(" ")
+    if space > limit * 0.5:
+        return window[:space], True
+    return window, True
+
+
+async def _fetch_page(url: str, char_limit: int, format: str = "text") -> dict:
+    """Render a public URL in a per-call tab and return its readable content.
+
+    Each call gets its own tab (created and closed here), so concurrent fetches
+    are parallel-safe. The requested URL and its post-redirect final URL are
+    both validated as public HTTP(S) (fail-closed), blocking
+    localhost/metadata/secret-bearing destinations and redirect-based SSRF.
     """
     # Validate the requested URL up front (fail-closed).
     validated = _validate_public_url(url)
-    async with _FETCH_LOCK:
-        async with _ENSURE_LOCK:
-            browser_ws = await asyncio.to_thread(_RUNTIME.ensure)
-        browser = await websockets.connect(browser_ws, max_size=MAX_CDP_MESSAGE)
-        page: Any = None
-        try:
-            page = await _ensure_reused_tab(browser, "fetch")
-            await _cdp_call(page, "Page.enable")
-            await _cdp_call(page, "Runtime.enable")
-            await _cdp_call(page, "Page.navigate", {"url": validated})
-            await _wait_ready(page)
-            # Re-validate the final URL after redirects (catch public->local SSRF).
-            final_url = str(await _evaluate(page, "location.href"))
-            _validate_public_url(final_url)
+    async with _ENSURE_LOCK:
+        browser_ws = await asyncio.to_thread(_RUNTIME.ensure)
+    browser = await websockets.connect(browser_ws, max_size=MAX_CDP_MESSAGE)
+    page: Any = None
+    target_id: str | None = None
+    try:
+        created = await _cdp_call(
+            browser,
+            "Target.createTarget",
+            {"url": "about:blank", "background": True, "newWindow": False},
+        )
+        target_id = created.get("targetId")
+        if not target_id or _RUNTIME.port is None:
+            raise RuntimeError("Chrome did not create a fetch tab")
+        page = await websockets.connect(
+            f"ws://127.0.0.1:{_RUNTIME.port}/devtools/page/{target_id}",
+            max_size=MAX_CDP_MESSAGE,
+        )
+        await _cdp_call(page, "Page.enable")
+        await _cdp_call(page, "Runtime.enable")
+        await _cdp_call(page, "Page.navigate", {"url": validated})
+        await _wait_ready(page)
+        # Re-validate the final URL after redirects (catch public->local SSRF).
+        final_url = str(await _evaluate(page, "location.href"))
+        _validate_public_url(final_url)
+        payload: dict = {
+            "url": final_url,  # kept for backward compatibility
+            "requested_url": validated,
+            "final_url": final_url,
+            "redirected": validated != final_url,
+        }
+        if format == "text":
             raw = await _evaluate(page, _FETCH_TEXT_JS)
             data = json.loads(raw or "{}")
-            text = " ".join(str(data.get("text", "")).split())
+            full = " ".join(str(data.get("text", "")).split())
             title = " ".join(str(data.get("title", "")).split())
-            truncated = len(text) > char_limit
-            return {
-                "url": final_url,
+            cut, was_cut = _smart_cut(full, char_limit)
+            payload.update(
+                {
+                    "title": title[:300],
+                    "text": cut,
+                    "total_chars": len(full),
+                    "truncated": was_cut,
+                    "format": "text",
+                }
+            )
+        else:
+            raw = await _evaluate(page, _FETCH_MD_JS)
+            data = json.loads(raw or "{}")
+            full = str(data.get("markdown", "") or "")
+            title = " ".join(str(data.get("title", "")).split())
+            links = data.get("links", [])
+            if not isinstance(links, list):
+                links = []
+            cut, was_cut = _smart_cut(full, char_limit)
+            entry: dict = {
                 "title": title[:300],
-                "text": text[:char_limit],
-                "truncated": truncated,
+                "total_chars": len(full),
+                "truncated": was_cut,
+                "format": format,
+                "links": links[:200],
             }
-        finally:
-            if page is not None:
-                try:
-                    await page.close()
-                except Exception:
-                    pass
+            if format == "markdown":
+                entry["markdown"] = cut
+            else:  # links: plain text plus follow-up crawl targets
+                entry["text"] = cut
+            payload.update(entry)
+        return payload
+    finally:
+        if page is not None:
+            try:
+                await page.close()
+            except Exception:
+                pass
+        if target_id is not None:
+            try:
+                await _cdp_call(browser, "Target.closeTarget", {"targetId": target_id})
+            except Exception:
+                pass
+        try:
             await browser.close()
+        except Exception:
+            pass
 
 
 @app.list_tools()
@@ -1052,7 +1174,9 @@ async def list_tools() -> list[types.Tool]:
             name="google_search",
             description=(
                 "Search Google in a JavaScript-rendering Chrome browser running "
-                "non-headless inside Xvfb. Returns structured search results."
+                "non-headless inside Xvfb. Returns structured search results. "
+                "Workflow: first google_search, then fetch_url on interesting "
+                "result URLs for full text."
             ),
             inputSchema={
                 "type": "object",
@@ -1065,6 +1189,16 @@ async def list_tools() -> list[types.Tool]:
                         "minimum": 1,
                         "maximum": 20,
                     },
+                    "hl": {
+                        "type": "string",
+                        "description": "Google UI language, e.g. ja or en (default ja)",
+                        "default": "ja",
+                    },
+                    "gl": {
+                        "type": "string",
+                        "description": "Google region, e.g. jp or us (default jp)",
+                        "default": "jp",
+                    },
                 },
                 "required": ["query"],
                 "additionalProperties": False,
@@ -1074,9 +1208,11 @@ async def list_tools() -> list[types.Tool]:
             name="fetch_url",
             description=(
                 "Fetch a public HTTP(S) URL with JavaScript rendering (Xvfb Chrome) "
-                "and return the page's readable text plus final URL and title. "
-                "Use for pages that need JS to render (SPAs, paywalled-after-consent "
-                "layouts, etc.). char_limit caps the returned text."
+                "and return readable content plus requested/final URLs, redirect "
+                "flag, and total_chars. Use after google_search on result URLs, "
+                "or for pages that need JS to render (SPAs, "
+                "paywalled-after-consent layouts, etc.). Parallel calls are safe; "
+                "each fetch uses its own tab. char_limit caps the returned text."
             ),
             inputSchema={
                 "type": "object",
@@ -1092,12 +1228,65 @@ async def list_tools() -> list[types.Tool]:
                         "minimum": 100,
                         "maximum": 200000,
                     },
+                    "format": {
+                        "type": "string",
+                        "description": "text: readable text; markdown: headings/paragraphs plus links; links: text plus follow-up link targets",
+                        "default": "text",
+                        "enum": ["text", "markdown", "links"],
+                    },
                 },
                 "required": ["url"],
                 "additionalProperties": False,
             },
         ),
+        types.Tool(
+            name="health_check",
+            description=(
+                "Report server health: display mode, browser/process liveness, "
+                "search rate-limiter queue, and last CAPTCHA time. No arguments."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        ),
     ]
+
+
+def _health_status() -> dict:
+    """Collect display/browser/queue/CAPTCHA health without starting anything."""
+    chrome_alive = _RUNTIME.chrome is not None and _RUNTIME.chrome.poll() is None
+    xvfb_alive = _RUNTIME.xvfb is not None and _RUNTIME.xvfb.poll() is None
+    xephyr_alive = _RUNTIME.xephyr is not None and _RUNTIME.xephyr.poll() is None
+    queue_wait_s = 0.0
+    try:
+        connection = _SEARCH_LIMITER._connect()
+        try:
+            row = connection.execute(
+                "SELECT next_at FROM rate_limit WHERE bucket = ?",
+                (_SEARCH_LIMITER._BUCKET,),
+            ).fetchone()
+        finally:
+            connection.close()
+        if row:
+            queue_wait_s = max(0.0, float(row[0]) - time.time())
+    except Exception:
+        queue_wait_s = -1.0
+    return {
+        "display_mode": _RUNTIME.display_mode,
+        "chrome_alive": chrome_alive,
+        "xvfb_alive": xvfb_alive,
+        "xephyr_alive": xephyr_alive,
+        "rate_limiter_queue_wait_s": round(queue_wait_s, 3),
+        "rate_limit_min_delay_s": _SEARCH_LIMITER.min_delay,
+        "rate_limit_max_delay_s": _SEARCH_LIMITER.max_delay,
+        "last_captcha_at": (
+            time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(_LAST_CAPTCHA_TS))
+            if _LAST_CAPTCHA_TS
+            else None
+        ),
+    }
 
 
 @app.call_tool()
@@ -1106,24 +1295,39 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         if name == "google_search":
             query = arguments.get("query", "")
             limit = arguments.get("limit", 5)
+            hl = arguments.get("hl", "ja")
+            gl = arguments.get("gl", "jp")
             if not isinstance(query, str) or not query.strip():
                 raise ValueError("query is required")
             if len(query) > 512:
                 raise ValueError("query is too long")
             if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20:
                 raise ValueError("limit must be an integer from 1 to 20")
-            results = await _search_google(query.strip(), limit)
-            payload = {"success": True, "data": {"web": results}}
+            for label, value in (("hl", hl), ("gl", gl)):
+                if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z-]{2,8}", value.strip()):
+                    raise ValueError(f"{label} must be a 2-8 letter language/region code")
+            results, waited = await _search_google(query.strip(), limit, hl.strip(), gl.strip())
+            payload = {
+                "success": True,
+                "data": {"web": results, "waited_ms": int(waited * 1000)},
+            }
         elif name == "fetch_url":
             url = arguments.get("url", "")
             char_limit = arguments.get("char_limit", 15000)
+            format = arguments.get("format", "text")
             if not isinstance(url, str) or not url.strip():
                 raise ValueError("url is required")
             if len(url) > 2048:
                 raise ValueError("url is too long")
             if isinstance(char_limit, bool) or not isinstance(char_limit, int) or not 100 <= char_limit <= 200000:
                 raise ValueError("char_limit must be an integer from 100 to 200000")
-            payload = {"success": True, "data": await _fetch_page(url.strip(), char_limit)}
+            if format not in ("text", "markdown", "links"):
+                raise ValueError("format must be one of text, markdown, links")
+            payload = {"success": True, "data": await _fetch_page(url.strip(), char_limit, format)}
+        elif name == "health_check":
+            if arguments:
+                raise ValueError("health_check takes no arguments")
+            payload = {"success": True, "data": _health_status()}
         else:
             raise ValueError(f"Unknown tool: {name}")
     except CaptchaRequired as exc:

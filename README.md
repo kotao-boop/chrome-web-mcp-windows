@@ -46,7 +46,7 @@ python3 -m pip install -e '.'
 # or: python -m pip install chrome_web_mcp-0.2.0-py3-none-any.whl
 ```
 
-MCP handshake check (`TOOLS: ['google_search', 'fetch_url']` expected):
+MCP handshake check (`TOOLS: ['fetch_url', 'google_search', 'health_check']` expected):
 
 ```bash
 uv run python -c "
@@ -172,29 +172,47 @@ Image size is about 1.4 GB (mostly Chromium and fonts).
 
 ## Tools
 
+Workflow: first `google_search`, then `fetch_url` on interesting result URLs
+for full text. `health_check` reports server state without starting a browser.
+
 ### `google_search`
 
 Input:
 
 ```json
-{"query": "search terms", "limit": 5}
+{"query": "search terms", "limit": 5, "hl": "ja", "gl": "jp"}
 ```
 
 `limit` is an integer from 1 to 20. Results are returned as structured JSON
-with `title`, `url`, `description`, and `position` fields.
+with `title`, `url`, `description`, and `position` fields, plus `waited_ms`
+(the shared rate-limiter queue wait). `hl`/`gl` are optional Google language
+(`ja`/`en`) and region (`jp`/`us`) hints; defaults preserve Japanese results.
 
 ### `fetch_url`
 
 Input:
 
 ```json
-{"url": "https://example.com", "char_limit": 15000}
+{"url": "https://example.com", "char_limit": 15000, "format": "text"}
 ```
 
 Only public `http://` and `https://` URLs without embedded credentials are
 accepted. Localhost, private IP ranges, metadata hosts, and non-public DNS
 resolutions are rejected. Redirect destinations are validated before they are
-used. `char_limit` is an integer from 100 to 200000.
+used. `char_limit` is an integer from 100 to 200000. Text is cut at a
+sentence boundary when possible. Returns `requested_url`, `final_url`,
+`redirected`, `total_chars`, and `truncated` alongside `title` and content
+(`url` mirrors `final_url` for compatibility). `format` is `text` (readable
+text), `markdown` (headings/paragraphs plus `links`), or `links` (text plus
+follow-up link targets). Concurrent fetches are parallel-safe; each uses its
+own tab.
+
+### `health_check`
+
+Input: `{}` (no arguments).
+
+Returns `display_mode`, browser/process liveness, the rate-limiter queue wait,
+its `min`/`max` delays, and the last CAPTCHA time.
 
 ## Runtime configuration
 
@@ -207,6 +225,8 @@ Optional environment variables:
 - `CW_RATE_LIMIT_DB` — shared SQLite path for the Google-search start-slot
   queue. By default it is `/tmp/chrome-web-mcp/search-rate-limit.sqlite3`, so
   separate MCP processes of the same user share one limiter.
+- `CW_MIN_DELAY` / `CW_MAX_DELAY` — randomized gap (seconds) between Google
+  search starts. Defaults `1.0` / `2.5`.
 - `CW_DISPLAY_MODE` — `xvfb` (default) runs Chrome on a private, fully hidden
   display. `xephyr` runs Chrome inside a nested `Xephyr` window titled
   `chrome-web-mcp` on your desktop: visible, minimizable, and movable, but
