@@ -214,7 +214,9 @@ with `title`, `url`, `description`, and `position` fields, plus `waited_ms`
 (the shared rate-limiter queue wait). `hl`/`gl` are optional Google language
 (`ja`/`en`) and region (`jp`/`us`) hints; defaults preserve Japanese results.
 `query` is required, max 512 chars. Searches run one at a time per process
-and are paced across processes (see Runtime configuration).
+and are paced across processes (see Runtime configuration). Bursts of 10+
+searches per minute return a `pace_warning` — slow down or batch queries to
+avoid a Google CAPTCHA; `health_check` reports the recent count.
 
 ### `fetch_url`
 

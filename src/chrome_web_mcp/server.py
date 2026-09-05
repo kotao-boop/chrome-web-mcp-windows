@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import collections
 import fcntl
 import ipaddress
 import itertools
@@ -868,6 +869,36 @@ _SEARCH_LIMITER = SharedSearchRateLimiter()
 _ENSURE_LOCK = asyncio.Lock()
 # Last time Google served a CAPTCHA (epoch seconds), for health_check.
 _LAST_CAPTCHA_TS: float | None = None
+# Sliding window of recent search starts, for burst warnings to agents.
+_PACE_WINDOW_S = 60.0
+_PACE_WARN_N = 10
+_SEARCH_TIMES: collections.deque[float] = collections.deque()
+
+
+def _note_search_start() -> int:
+    """Record a search start; return starts within the pace window."""
+    now = time.monotonic()
+    _SEARCH_TIMES.append(now)
+    while _SEARCH_TIMES and _SEARCH_TIMES[0] <= now - _PACE_WINDOW_S:
+        _SEARCH_TIMES.popleft()
+    return len(_SEARCH_TIMES)
+
+
+def _peek_search_count() -> int:
+    """Count starts within the pace window without recording."""
+    now = time.monotonic()
+    while _SEARCH_TIMES and _SEARCH_TIMES[0] <= now - _PACE_WINDOW_S:
+        _SEARCH_TIMES.popleft()
+    return len(_SEARCH_TIMES)
+
+
+def _pace_warning(count: int) -> str | None:
+    if count >= _PACE_WARN_N:
+        return (
+            f"{count} searches in the last 60s; slow down or batch queries "
+            "to avoid a Google CAPTCHA"
+        )
+    return None
 
 
 async def _cdp_call(connection: Any, method: str, params: dict | None = None) -> dict:
@@ -1113,21 +1144,23 @@ def _captcha_detail_for_mode() -> str:
 
 async def _search_google(
     query: str, limit: int, hl: str = "ja", gl: str = "jp"
-) -> tuple[list[dict], float]:
+) -> tuple[list[dict], float, str | None]:
     """Run one Google search with process-wide pacing and a shared slot queue.
 
-    Returns (results, waited_seconds) so callers can expose queue waits.
+    Returns (results, waited_seconds, pace_warning) so callers can expose
+    queue waits and burst warnings.
     """
     async with _SEARCH_LOCK:
         wait_for = await asyncio.to_thread(_SEARCH_LIMITER.reserve_slot)
         if wait_for:
             await asyncio.sleep(wait_for)
+        pace_count = _note_search_start()
         candidates = await _extract_google_candidates(query, limit, hl, gl)
     results = await _build_results(candidates, limit, resolve_url=_resolve_candidate_url)
     if not results:
         raise RuntimeError("Google rendered no usable external search results")
     await asyncio.to_thread(_RUNTIME.hide_for_human)
-    return results, wait_for
+    return results, wait_for, _pace_warning(pace_count)
 
 
 # Extract clean, readable text from a rendered page (no scripts/styles/nav).
@@ -1373,7 +1406,8 @@ async def list_tools() -> list[types.Tool]:
                 "Search Google in a JavaScript-rendering Chrome browser running "
                 "non-headless inside Xvfb. Returns structured search results. "
                 "Workflow: first google_search, then fetch_url on interesting "
-                "result URLs for full text."
+                "result URLs for full text. Pace calls: bursts of 10+ searches "
+                "per minute raise a pace_warning and risk a Google CAPTCHA."
             ),
             inputSchema={
                 "type": "object",
@@ -1473,6 +1507,7 @@ def _health_status() -> dict:
             queue_wait_s = max(0.0, float(row[0]) - time.time())
     except Exception:
         queue_wait_s = -1.0
+    pace_count = _peek_search_count()
     return {
         "display_mode": _RUNTIME.display_mode,
         "chrome_alive": chrome_alive,
@@ -1481,6 +1516,8 @@ def _health_status() -> dict:
         "rate_limiter_queue_wait_s": round(queue_wait_s, 3),
         "rate_limit_min_delay_s": _SEARCH_LIMITER.min_delay,
         "rate_limit_max_delay_s": _SEARCH_LIMITER.max_delay,
+        "recent_searches_60s": pace_count,
+        "pace_warning": _pace_warning(pace_count),
         "last_captcha_at": (
             time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(_LAST_CAPTCHA_TS))
             if _LAST_CAPTCHA_TS
@@ -1506,10 +1543,14 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             for label, value in (("hl", hl), ("gl", gl)):
                 if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z-]{2,8}", value.strip()):
                     raise ValueError(f"{label} must be a 2-8 letter language/region code")
-            results, waited = await _search_google(query.strip(), limit, hl.strip(), gl.strip())
+            results, waited, pace = await _search_google(query.strip(), limit, hl.strip(), gl.strip())
             payload = {
                 "success": True,
-                "data": {"web": results, "waited_ms": int(waited * 1000)},
+                "data": {
+                    "web": results,
+                    "waited_ms": int(waited * 1000),
+                    "pace_warning": pace,
+                },
             }
         elif name == "fetch_url":
             url = arguments.get("url", "")

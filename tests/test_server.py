@@ -199,14 +199,14 @@ def test_call_tool_returns_single_structured_json_layer(monkeypatch):
     async def fake_search(query, limit, hl="ja", gl="jp"):
         assert query == "Hermes Agent"
         assert limit == 2
-        return [{"title": "Hermes", "url": "https://example.com/", "description": "Agent", "position": 1}], 0.0
+        return [{"title": "Hermes", "url": "https://example.com/", "description": "Agent", "position": 1}], 0.0, None
 
     monkeypatch.setattr(server, "_search_google", fake_search)
     content = run_async(_call_tool("google_search", {"query": "Hermes Agent", "limit": 2}))
     payload = json.loads(content[0].text)
     assert payload == {
         "success": True,
-        "data": {"web": [{"title": "Hermes", "url": "https://example.com/", "description": "Agent", "position": 1}], "waited_ms": 0},
+        "data": {"web": [{"title": "Hermes", "url": "https://example.com/", "description": "Agent", "position": 1}], "waited_ms": 0, "pace_warning": None},
     }
 
 
@@ -340,7 +340,7 @@ def test_xpra_expose_is_opt_in(monkeypatch):
 @pytest.mark.live
 def test_live_google_search_returns_real_external_results():
     try:
-        results, waited_ms = asyncio.run(server._search_google("Hermes Agent Nous Research", 3))
+        results, waited_ms, pace = asyncio.run(server._search_google("Hermes Agent Nous Research", 3))
     except server.CaptchaRequired:
         pytest.skip("Google requires human CAPTCHA; challenge handling is tested separately")
     finally:
@@ -363,6 +363,15 @@ def test_smart_cut_prefers_sentence_boundary():
     cut, truncated = server._smart_cut("First sentence. Second sentence here", 20)
     assert truncated is True
     assert cut == "First sentence."
+
+
+def test_pace_warning_fires_after_burst():
+    server._SEARCH_TIMES.clear()
+    for _ in range(9):
+        assert server._pace_warning(server._note_search_start()) is None
+    assert "slow down" in (server._pace_warning(server._note_search_start()) or "")
+    assert server._peek_search_count() == 10
+    server._SEARCH_TIMES.clear()
 
 
 def test_call_tool_google_search_rejects_bad_hl_gl():
