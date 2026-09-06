@@ -1,5 +1,7 @@
 # chrome-web-mcp
 
+[日本語版 README](README.jp.md)
+
 > [!CAUTION]
 > Single-session use only: one client process, one browser, sequential searches.
 >
