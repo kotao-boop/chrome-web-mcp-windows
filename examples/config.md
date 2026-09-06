@@ -16,6 +16,20 @@ The server automatically reads `~/.config/chrome-web-mcp/config.json`. Use the
 The file is per user. You do not need to change the server code for a
 different language or region.
 
+## Headless environments
+
+If you run on a headless server, CI runner, SSH session without X forwarding,
+or any machine without a desktop display, set:
+
+```json
+{ "show_browser": false }
+```
+
+This uses hidden Xvfb instead of Xephyr. The built-in default is `true` for
+desktop use, so explicitly set `false` on headless machines and restart the
+MCP client after changing the file. Docker already sets hidden Xvfb inside the
+container by default.
+
 ## Settings
 
 ### `show_browser`

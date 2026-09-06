@@ -28,7 +28,7 @@ A stdio Model Context Protocol server that exposes focused browser tools:
 - `health_check` — display, browser, queue, and CAPTCHA status.
 
 The server is designed to be configured by any MCP client that can launch a
-stdio command. It does not depend on Hermes Agent.
+stdio command.
 
 ## Features
 
@@ -67,6 +67,26 @@ Linux only. Windows and macOS are not supported: this server depends on
 process-group signaling (`killpg`), none of which work as-is on Windows.
 A Windows/macOS port would need headless Chrome plus a different locking
 scheme. Docker helps only on a Linux host with an X server for `xephyr` mode.
+
+## Headless environments
+
+On a headless server, CI runner, SSH session without X forwarding, or any
+machine without a desktop display, set `show_browser` to `false`:
+
+```json
+{
+  "show_browser": false
+}
+```
+
+Edit `~/.config/chrome-web-mcp/config.json` (or the file specified by
+`CW_CONFIG`) and restart the MCP client. This forces Chrome onto hidden Xvfb
+and avoids the Xephyr startup error caused by the lack of a user `DISPLAY`.
+
+The built-in default is `true` for desktop use, so do not omit this setting on
+a headless machine. A Docker installation already sets
+`CW_DISPLAY_MODE=xvfb` inside the container, so it normally needs no host
+display or extra setting.
 
 ## Linux quickstart (Debian/Ubuntu, copy-paste)
 
