@@ -384,17 +384,6 @@ When Google presents a CAPTCHA during `google_search`, the server returns
 default `xvfb` mode, wait a while and retry. Automatic Xpra attach is disabled
 unless `CW_XPRA_EXPOSE=1` is set, because it once crashed the desktop session.
 
-## Development and verification
+## Development
 
-```bash
-python -m pip install -e '.[test]'
-pytest -q
-pytest -q -m 'not live'  # deterministic tests; browser fixtures use local responses
-python -m build
-```
-
-The end-to-end tests exercise the real stdio MCP handshake, `tools/list`,
-Google search, public URL fetching, and shutdown cleanup. They require Chrome,
-Xvfb, and network access. Tests marked `live` contact Google and can fail if the
-network is unavailable or Google requires a CAPTCHA. Browser security regression
-tests use synthetic responses and local fixtures, without depending on Google.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, test (`pytest -q -m 'not live'` for deterministic only), and build steps.
