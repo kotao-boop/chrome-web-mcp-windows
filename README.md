@@ -208,6 +208,48 @@ docker run -i --rm -e DISPLAY=$DISPLAY -e CW_DISPLAY_MODE=xephyr \
 
 Image size is about 1.5 GB (mostly Chromium and fonts).
 
+## Update
+
+For a local checkout, pull and re-sync (restart the MCP client afterwards):
+
+```bash
+git -C /absolute/path/to/chrome-web-mcp fetch origin
+git -C /absolute/path/to/chrome-web-mcp reset --hard origin/main
+```
+
+`reset --hard` is used instead of `pull --ff-only` because history is
+occasionally force-pushed; stash local changes first if you have any
+(`git stash`). `uv run --directory ... chrome-web-mcp` picks up the new
+dependencies automatically on next launch — no reinstall step needed.
+
+For a dedicated venv (e.g. `~/.local/share/chrome-web-mcp/venv`), reinstall
+after pulling:
+
+```bash
+uv pip install --python ~/.local/share/chrome-web-mcp/venv/bin/python -U -e /absolute/path/to/chrome-web-mcp
+```
+
+For a wheel install, rebuild and reinstall:
+
+```bash
+python -m build --wheel --outdir /absolute/path/to/chrome-web-mcp/dist /absolute/path/to/chrome-web-mcp
+python -m pip install -U /absolute/path/to/chrome-web-mcp/dist/chrome_web_mcp-*.whl
+```
+
+For Docker, just rebuild — no `Dockerfile` edit is needed (it copies
+`pyproject.toml` + `src/` and runs `pip install .`, so code and dependency
+changes are picked up automatically):
+
+```bash
+docker build -t chrome-web-mcp /absolute/path/to/chrome-web-mcp
+```
+
+Verify after update:
+
+```bash
+uv pip list --python ~/.local/share/chrome-web-mcp/venv/bin/python | grep -E "chrome-web|trafilatura"
+```
+
 ## Install size (rough, Debian host)
 
 - Python environment (`.venv`, incl. trafilatura/html2text): ~100 MB
