@@ -1,0 +1,10 @@
+{
+  "show_browser": true,
+  "hl": "ja",
+  "gl": "jp",
+  "limit": 5,
+  "char_limit": 15000,
+  "format": "markdown",
+  "min_delay": 1.0,
+  "max_delay": 2.5
+}

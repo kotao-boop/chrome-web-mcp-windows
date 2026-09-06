@@ -313,8 +313,17 @@ def test_fetch_page_runs_concurrent_calls_on_separate_tabs(monkeypatch):
     assert in_section["max"] == 2
 
 
-def test_display_mode_defaults_to_xvfb(monkeypatch):
+def test_display_mode_defaults_to_xephyr(monkeypatch):
     monkeypatch.delenv("CW_DISPLAY_MODE", raising=False)
+    monkeypatch.setattr(server, "CONFIG", dict(server._CONFIG_DEFAULTS))
+    assert server.BrowserRuntime().display_mode == "xephyr"
+
+
+def test_show_browser_false_selects_xvfb(monkeypatch):
+    monkeypatch.delenv("CW_DISPLAY_MODE", raising=False)
+    config = dict(server._CONFIG_DEFAULTS)
+    config["show_browser"] = False
+    monkeypatch.setattr(server, "CONFIG", config)
     assert server.BrowserRuntime().display_mode == "xvfb"
 
 
@@ -392,6 +401,8 @@ def test_call_tool_fetch_url_rejects_bad_format():
 
 def test_health_check_reports_status(monkeypatch):
     monkeypatch.setattr(server, "_LAST_CAPTCHA_TS", None)
+    monkeypatch.setattr(server, "CONFIG", dict(server._CONFIG_DEFAULTS))
+    monkeypatch.setattr(server._RUNTIME, "display_mode", "xvfb")
     payload = json.loads(run_async(_call_tool("health_check", {}))[0].text)
     assert payload["success"] is True
     data = payload["data"]

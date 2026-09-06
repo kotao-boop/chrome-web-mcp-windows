@@ -33,7 +33,8 @@ stdio command. It does not depend on Hermes Agent.
 ## Features
 
 - JS-rendered Google search + public URL fetch through a real (non-headless)
-  Chrome on a private Xvfb display — harder to bot-detect than `--headless`.
+  Chrome on a private virtual display (Xephyr when visible, Xvfb when hidden)
+  — harder to bot-detect than `--headless`.
 - Shaped markdown by default (`trafilatura` + `html2text`, pure-Python, no
   extra service), with full-text fallback and follow-up link targets.
 - Language/region hints (`hl`/`gl`) for reproducible JA/EN results.
@@ -49,7 +50,8 @@ stdio command. It does not depend on Hermes Agent.
 
 - Python 3.10 or newer
 - Google Chrome, Google Chrome for Testing, or Chromium
-- `Xvfb` on Linux
+- `Xephyr` on Linux for the default visible-window mode
+- `Xvfb` on Linux for hidden-window mode
 - `xpra` on Linux if interactive CAPTCHA recovery is desired
 
 The Python dependencies are installed with the package. Chrome and Xvfb remain
@@ -70,13 +72,10 @@ scheme. Docker helps only on a Linux host with an X server for `xephyr` mode.
 
 ```bash
 # 1. System dependencies
-sudo apt update && sudo apt install -y chromium xvfb x11-utils python3-venv
+sudo apt update && sudo apt install -y chromium xvfb xserver-xephyr x11-utils python3-venv
 which chromium || which google-chrome || which chromium-browser
 which Xvfb
 python3 --version  # 3.10+
-
-# Optional: visible-window mode only
-# sudo apt install -y xserver-xephyr
 
 # 2. Create an environment and install the package (either one)
 python3 -m venv .venv
@@ -199,12 +198,44 @@ docker build -t chrome-web-mcp .
 }
 ```
 
-Visible-window mode needs the host X socket (Linux with X11):
+For opencode, add a separate entry to `~/.config/opencode/opencode.json` so
+you can keep the local and Docker versions available side by side:
+
+```json
+"chrome-web-docker": {
+  "type": "local",
+  "command": ["docker", "run", "--rm", "-i", "chrome-web-mcp:latest"],
+  "enabled": true,
+  "timeout": 120000
+}
+```
+
+The Docker image uses hidden Xvfb by default. This is separate from the local
+`chrome-web` entry, whose `show_browser` setting can display a desktop window.
+Restart opencode after adding or changing the entry.
+
+Hidden mode is normally sufficient. If Google returns
+`captcha_required: true`, the CAPTCHA is displayed inside the Docker
+container's browser, so the local `chrome-web` window cannot solve it. Start
+the Docker MCP server in visible Xephyr mode instead and retry the search:
 
 ```bash
-docker run -i --rm -e DISPLAY=$DISPLAY -e CW_DISPLAY_MODE=xephyr \
-  -v /tmp/.X11-unix:/tmp/.X11-unix chrome-web-mcp
+docker run -i --rm \
+  -e DISPLAY=$DISPLAY \
+  -e CW_DISPLAY_MODE=xephyr \
+  -e XAUTHORITY=$XAUTHORITY \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  -v "$XAUTHORITY":"$XAUTHORITY":ro \
+  chrome-web-mcp
 ```
+
+This requires a Linux desktop X display and `Xephyr`. On Wayland/Mutter, the
+working Xauthority file may be a `.mutter-Xwaylandauth.*` file under
+`$XDG_RUNTIME_DIR` rather than `$XAUTHORITY`; mount that directory and set
+`XAUTHORITY` to the matching path inside the container. The resulting
+`chrome-web-mcp` window belongs to the Docker process, and you must retry using
+that same Docker MCP session. For the simplest CAPTCHA recovery, use the local
+`chrome-web` entry with `show_browser: true` from the beginning.
 
 Image size is about 1.5 GB (mostly Chromium and fonts).
 
@@ -321,8 +352,45 @@ its `min`/`max` delays, and the last CAPTCHA time.
 
 ## Runtime configuration
 
+Most users only need the JSON file:
+
+```bash
+mkdir -p ~/.config/chrome-web-mcp
+cp examples/config.json examples/config.md ~/.config/chrome-web-mcp/
+```
+
+Then edit `~/.config/chrome-web-mcp/config.json` and restart the MCP client.
+The settings most people change are:
+
+```json
+{
+  "show_browser": true,
+  "hl": "ja",
+  "gl": "jp"
+}
+```
+
+- `show_browser`: `true` shows the browser window; `false` hides it.
+- `hl`: Google interface language. `ja` is Japanese and `en` is English.
+- `gl`: Google result region. `jp` is Japan and `us` is the United States.
+
+The built-in search defaults are `hl: ja` and `gl: jp`, but each user can set
+their own values in this file. For example, use `"hl": "en"` and
+`"gl": "us"` for English/US-oriented Google results. See
+[`examples/config.md`](examples/config.md) for all settings and examples.
+
+The JSON file is optional. If it is absent, the built-in defaults are used and
+the browser window is shown (`show_browser: true`). Set it to `false` to hide
+the window. JSON comments are not supported, so keep `config.json` as plain
+JSON.
+
 Optional environment variables:
 
+- `CW_CONFIG` — path to an optional JSON config file for window on/off and
+  tool defaults. When unset, `~/.config/chrome-web-mcp/config.json` is used
+  if it exists. Explicit environment variables below win over the file.
+  Settings become tool defaults when the caller omits them. Unknown keys warn
+  on stderr; invalid values warn and keep the built-in default per key.
 - `CW_CHROME` — explicit Chrome/Chromium executable path.
 - `CW_PROFILE_DIR` — explicit browser profile directory. By default, each
   server process uses an isolated per-PID temporary profile.
@@ -332,12 +400,12 @@ Optional environment variables:
   separate MCP processes of the same user share one limiter.
 - `CW_MIN_DELAY` / `CW_MAX_DELAY` — randomized gap (seconds) between Google
   search starts. Defaults `1.0` / `2.5`.
-- `CW_DISPLAY_MODE` — `xvfb` (default) runs Chrome on a private, fully hidden
-  display. `xephyr` runs Chrome inside a nested `Xephyr` window titled
-  `chrome-web-mcp` on your desktop: visible, minimizable, and movable, but
-  tool calls can never pop a window to the front outside of it. Requires
-  `Xephyr` (`xserver-xephyr`) and a user `DISPLAY`. Recommended when you want
-  to watch searches or solve a CAPTCHA by hand.
+- `CW_DISPLAY_MODE` — advanced environment override for `show_browser`:
+  `xvfb` runs Chrome on a private, fully hidden display, while `xephyr` runs
+  Chrome inside a nested `Xephyr` window titled `chrome-web-mcp` on your
+  desktop. The latter is visible, minimizable, and movable, but tool calls can
+  never pop a window to the front outside of it. Requires `Xephyr`
+  (`xserver-xephyr`) and a user `DISPLAY`.
 - When `CW_DISPLAY_MODE=xephyr`, the server preserves an explicit `XAUTHORITY`
   or automatically discovers Mutter's `.mutter-Xwaylandauth.*` file under
   `XDG_RUNTIME_DIR`, then falls back to `~/.Xauthority`. This lets stdio MCP
@@ -379,10 +447,11 @@ browser-backed search/fetch MCP server, not a general remote browser-control
 API.
 
 When Google presents a CAPTCHA during `google_search`, the server returns
-`captcha_required: true`. In `xephyr` display mode, solve the challenge in the
-`chrome-web-mcp` window on your desktop, then retry the same search. In the
-default `xvfb` mode, wait a while and retry. Automatic Xpra attach is disabled
-unless `CW_XPRA_EXPOSE=1` is set, because it once crashed the desktop session.
+`captcha_required: true`. With `show_browser: true` (Xephyr), solve the
+challenge in the `chrome-web-mcp` window on your desktop, then retry the same
+search. With `show_browser: false` (Xvfb), wait a while and retry. Automatic
+Xpra attach is disabled unless `CW_XPRA_EXPOSE=1` is set, because it once
+crashed the desktop session.
 
 ## Development
 

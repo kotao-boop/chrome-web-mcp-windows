@@ -25,6 +25,7 @@ import signal
 import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.parse
@@ -254,6 +255,102 @@ def _stop_recorded_process(record: dict) -> None:
         return
 
 
+_CONFIG_DEFAULTS = {
+    "show_browser": True,  # true: visible Xephyr window | false: hidden Xvfb
+    "hl": "ja",
+    "gl": "jp",
+    "limit": 5,
+    "char_limit": 15000,
+    "format": "markdown",
+    "min_delay": 1.0,
+    "max_delay": 2.5,
+}
+
+
+def _warn_config(message: str) -> None:
+    try:
+        print(f"chrome-web-mcp: config: {message}", file=sys.stderr)
+    except Exception:
+        pass
+
+
+def _load_config() -> dict:
+    """Load the optional JSON config file; fall back to defaults per key.
+
+    Path from CW_CONFIG, else ~/.config/chrome-web-mcp/config.json when it
+    exists. Invalid keys/values warn on stderr and keep the default value.
+    """
+    raw_path = os.environ.get("CW_CONFIG", "").strip()
+    path = Path(raw_path).expanduser() if raw_path else (
+        Path.home() / ".config" / "chrome-web-mcp" / "config.json"
+    )
+    cfg: dict[str, Any] = dict(_CONFIG_DEFAULTS)
+    if not path.is_file():
+        if raw_path:
+            _warn_config(f"{path} not found; using defaults")
+        return cfg
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        _warn_config(f"cannot parse {path} ({exc}); using defaults")
+        return cfg
+    if not isinstance(data, dict):
+        _warn_config(f"{path} must be a JSON object; using defaults")
+        return cfg
+    for key in data:
+        if key not in _CONFIG_DEFAULTS:
+            _warn_config(f"unknown key {key!r} ignored")
+    if "show_browser" in data:
+        value = data["show_browser"]
+        if isinstance(value, bool):
+            cfg["show_browser"] = value
+        else:
+            _warn_config("show_browser must be true or false; using default")
+    for key in ("hl", "gl"):
+        if key in data:
+            value = data[key]
+            if isinstance(value, str) and re.fullmatch(r"[A-Za-z-]{2,8}", value.strip()):
+                cfg[key] = value.strip()
+            else:
+                _warn_config(f"{key} must be a 2-8 letter code; using default")
+    if "limit" in data:
+        value = data["limit"]
+        if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 20:
+            cfg["limit"] = value
+        else:
+            _warn_config("limit must be an integer from 1 to 20; using default")
+    if "char_limit" in data:
+        value = data["char_limit"]
+        if isinstance(value, int) and not isinstance(value, bool) and 100 <= value <= 200000:
+            cfg["char_limit"] = value
+        else:
+            _warn_config("char_limit must be an integer from 100 to 200000; using default")
+    if "format" in data:
+        if data["format"] in ("text", "markdown", "links"):
+            cfg["format"] = data["format"]
+        else:
+            _warn_config("format must be text, markdown, or links; using default")
+    delays: dict[str, float] = {}
+    for key in ("min_delay", "max_delay"):
+        if key in data:
+            value = data[key]
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+                delays[key] = float(value)
+            else:
+                _warn_config(f"{key} must be a non-negative number; using default")
+    if delays:
+        lo = delays["min_delay"] if "min_delay" in delays else float(cfg["min_delay"])
+        hi = delays["max_delay"] if "max_delay" in delays else float(cfg["max_delay"])
+        if hi >= lo:
+            cfg.update(delays)
+        else:
+            _warn_config("max_delay must be >= min_delay; using defaults")
+    return cfg
+
+
+CONFIG = _load_config()
+
+
 class BrowserRuntime:
     """Own one isolated Xvfb/Chrome pair for this MCP process."""
 
@@ -269,12 +366,12 @@ class BrowserRuntime:
         self.xpra_server: subprocess.Popen | None = None
         self.xpra_client: subprocess.Popen | None = None
         self.user_display = os.environ.get("DISPLAY")
-        # CW_DISPLAY_MODE=xvfb (default): Chrome on a private Xvfb display,
-        # fully hidden, never steals focus.
-        # CW_DISPLAY_MODE=xephyr: Chrome on a nested Xephyr window living on
-        # the user's desktop. The user can see/minimize it, but Chrome inside
-        # can never pop a window to the front outside of it.
-        self.display_mode = os.environ.get("CW_DISPLAY_MODE", "xvfb").strip().lower()
+        # CW_DISPLAY_MODE is an advanced environment override. The JSON
+        # show_browser boolean is the user-facing switch.
+        env_display_mode = os.environ.get("CW_DISPLAY_MODE", "").strip().lower()
+        self.display_mode = env_display_mode or (
+            "xephyr" if CONFIG["show_browser"] else "xvfb"
+        )
         # A long-lived background search tab, reused across queries so we do not
         # repeatedly open/close targets (which looks like bot activity to Google).
         self.search_target_id: str | None = None
@@ -808,9 +905,9 @@ class SharedSearchRateLimiter:
         max_delay: float | None = None,
     ) -> None:
         if min_delay is None:
-            min_delay = _env_float("CW_MIN_DELAY", 1.0)
+            min_delay = _env_float("CW_MIN_DELAY", float(CONFIG["min_delay"]))
         if max_delay is None:
-            max_delay = _env_float("CW_MAX_DELAY", 2.5)
+            max_delay = _env_float("CW_MAX_DELAY", float(CONFIG["max_delay"]))
         if min_delay < 0 or max_delay < min_delay:
             raise ValueError("invalid search rate-limit delay range")
         default_path = Path(tempfile.gettempdir()) / "chrome-web-mcp" / "search-rate-limit.sqlite3"
@@ -1416,19 +1513,19 @@ async def list_tools() -> list[types.Tool]:
                     "limit": {
                         "type": "integer",
                         "description": "Maximum results (1-20)",
-                        "default": 5,
+                        "default": CONFIG["limit"],
                         "minimum": 1,
                         "maximum": 20,
                     },
                     "hl": {
                         "type": "string",
-                        "description": "Google UI language, e.g. ja or en (default ja)",
-                        "default": "ja",
+                        "description": "Google UI language, e.g. ja or en",
+                        "default": CONFIG["hl"],
                     },
                     "gl": {
                         "type": "string",
-                        "description": "Google region, e.g. jp or us (default jp)",
-                        "default": "jp",
+                        "description": "Google region, e.g. jp or us",
+                        "default": CONFIG["gl"],
                     },
                 },
                 "required": ["query"],
@@ -1457,15 +1554,15 @@ async def list_tools() -> list[types.Tool]:
                     },
                     "char_limit": {
                         "type": "integer",
-                        "description": "Maximum characters of readable text to return (default 15000).",
-                        "default": 15000,
+                        "description": "Maximum characters of readable text to return.",
+                        "default": CONFIG["char_limit"],
                         "minimum": 100,
                         "maximum": 200000,
                     },
                     "format": {
                         "type": "string",
-                        "description": "markdown (default): shaped readable markdown, boilerplate removed. text: full rendered text, use when markdown looks incomplete. links: text plus follow-up link targets",
-                        "default": "markdown",
+                        "description": "markdown: shaped readable markdown, boilerplate removed. text: full rendered text, use when markdown looks incomplete. links: text plus follow-up link targets",
+                        "default": CONFIG["format"],
                         "enum": ["text", "markdown", "links"],
                     },
                 },
@@ -1531,9 +1628,9 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     try:
         if name == "google_search":
             query = arguments.get("query", "")
-            limit = arguments.get("limit", 5)
-            hl = arguments.get("hl", "ja")
-            gl = arguments.get("gl", "jp")
+            limit = arguments.get("limit", CONFIG["limit"])
+            hl = arguments.get("hl", CONFIG["hl"])
+            gl = arguments.get("gl", CONFIG["gl"])
             if not isinstance(query, str) or not query.strip():
                 raise ValueError("query is required")
             if len(query) > 512:
@@ -1554,8 +1651,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             }
         elif name == "fetch_url":
             url = arguments.get("url", "")
-            char_limit = arguments.get("char_limit", 15000)
-            format = arguments.get("format", "markdown")
+            char_limit = arguments.get("char_limit", CONFIG["char_limit"])
+            format = arguments.get("format", CONFIG["format"])
             if not isinstance(url, str) or not url.strip():
                 raise ValueError("url is required")
             if len(url) > 2048:
