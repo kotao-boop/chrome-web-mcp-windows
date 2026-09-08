@@ -591,7 +591,12 @@ class BrowserRuntime:
                 if self.display_mode == "hidden" and proc.pid:
                     platform_runtime.hide_process_windows(proc.pid)
                 return port, f"ws://127.0.0.1:{port}{path}"
-            except (FileNotFoundError, IndexError, ValueError):
+            except (FileNotFoundError, PermissionError, IndexError, ValueError):
+                # Chrome can keep DevToolsActivePort open briefly while it is
+                # publishing the CDP endpoint. Windows may report that
+                # transient sharing violation as PermissionError; keep
+                # waiting until the startup deadline instead of failing a
+                # healthy browser launch.
                 time.sleep(0.1)
         raise RuntimeError(f"Chrome did not expose CDP within {startup_timeout} seconds")
 
