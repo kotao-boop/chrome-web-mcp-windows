@@ -40,9 +40,10 @@ def browser_fixture(tmp_path, monkeypatch):
     original = server._cdp_call
     response = {"html": "", "redirect": None}
     async def intercept(conn, method, params=None):
-        if method != "Page.navigate" or params.get("url") != PUBLIC_FIXTURE:
+        fixture_url = response.get("url", PUBLIC_FIXTURE)
+        if method != "Page.navigate" or params.get("url") != fixture_url:
             return await original(conn, method, params)
-        await original(conn, "Fetch.enable", {"patterns": [{"urlPattern": PUBLIC_FIXTURE, "requestStage": "Request"}]})
+        await original(conn, "Fetch.enable", {"patterns": [{"urlPattern": fixture_url, "requestStage": "Request"}]})
         request_id = next(server._CDP_IDS)
         await conn.send(json.dumps({"id": request_id, "method": method, "params": params}))
         while True:
@@ -103,3 +104,30 @@ def test_chunk_boundaries_preserve_unicode(browser_fixture):
     response["html"] = '<html><body><p>' + body + '</p></body></html>'
     result = asyncio.run(server._fetch_page(PUBLIC_FIXTURE, 200000, "text"))
     assert result["text"] == body
+
+
+def test_delayed_body_is_not_replaced_by_loading_message(browser_fixture):
+    response, _, _ = browser_fixture
+    response["html"] = '''<html><body><p id="body">Loading...</p>
+      <script>setTimeout(() => {
+        document.getElementById('body').textContent = 'Delayed article body is ready.';
+      }, 2000);</script></body></html>'''
+    result = asyncio.run(server._fetch_page(PUBLIC_FIXTURE, 500, "text"))
+    assert result["text"] == "Delayed article body is ready."
+
+
+def test_x_post_waits_for_requested_article(browser_fixture):
+    response, _, _ = browser_fixture
+    # Fulfilled through CDP: this does not fetch a real X page.
+    response["url"] = "https://x.com/fixture/status/123"
+    response["html"] = '''<html><body>
+      <article><a href="/fixture/status/999">Other post</a>
+      <div data-testid="tweetText">Unrelated text</div></article>
+      <script>setTimeout(() => {
+        document.body.insertAdjacentHTML('beforeend',
+          '<article><a href="/fixture/status/123">Requested post</a>' +
+          '<div data-testid="tweetText">Target post loaded.</div></article>');
+      }, 4000);</script></body></html>'''
+    result = asyncio.run(server._fetch_page(response["url"], 1000, "text"))
+    assert "Target post loaded." in result["text"]
+    assert "warning" not in result

@@ -161,7 +161,16 @@ The server detects Google CAPTCHA pages but does not bypass them.
 
 - visible mode: solve the challenge in the Chrome window, then retry
 - hidden / headless: the tool returns `captcha_required: true`; wait or
-  restart with `show_browser: true`
+  set `CW_DISPLAY_MODE=native` in the MCP client's server environment and restart.
+  This overrides `show_browser`; when the environment variable is unset,
+  `show_browser: true` also works. Search again after restarting, solve any
+  challenge in the visible window, then retry.
+
+## Updating
+
+Stop all MCP servers using the checkout before updating: Windows cannot replace
+a running executable. Follow the [README update steps](../README.md#updating)
+in a separate PowerShell window, and reconnect only after installation succeeds.
 
 ## Cleanup
 

@@ -291,6 +291,13 @@ cloud metadata hosts, credential-bearing URLs, and similar destinations are
 rejected. The response includes the final URL, redirect status, total length,
 truncation status, and extraction method.
 
+The server waits at least 2.5 seconds and requires the displayed text to remain
+stable for one second before extraction. For X post URLs, it also checks for the
+requested post's text, image, or video. If this cannot be confirmed within 25
+seconds, the response includes `data.warning` alongside the available screen
+content. Do not treat that content as the post body. This does not guarantee
+completion of every site's delayed content.
+
 ---
 
 ### 3. `health_check`
@@ -420,7 +427,10 @@ error like this:
   complete the challenge yourself, and run the same search again.
 - **Hidden browser (`show_browser: false`)**: The hidden challenge cannot be
   completed from the tool. Wait a few minutes and retry, or switch to
-  `show_browser: true` and restart.
+  `CW_DISPLAY_MODE=native` in the MCP client's server environment and restart.
+  When `CW_DISPLAY_MODE` is unset, `show_browser: true` also enables a visible
+  window. Run the search after restarting; if a challenge appears, solve it
+  manually and retry. The environment variable overrides `show_browser`.
 
 ---
 
@@ -468,14 +478,25 @@ needed. Actual size varies with the Python version and Chrome release.
 Review local changes before updating. Do not use `reset --hard`, because it can
 discard work.
 
+First stop every MCP server using this executable. If a client cannot stop just
+the server, exit that AI client. Windows cannot replace a running executable.
+Run the following in a separate PowerShell window, using your actual checkout path.
+
 ```powershell
-git -C "C:\Users\YOU\chrome-web-mcp" fetch origin
-git -C "C:\Users\YOU\chrome-web-mcp" pull --ff-only
-& "C:\Users\YOU\chrome-web-mcp-windows\.venv\Scripts\python.exe" -m pip install -e "C:\Users\YOU\chrome-web-mcp-windows[test]"
+$repoPath = "C:\Users\YOU\chrome-web-mcp-windows"
+Set-Location -LiteralPath $repoPath
+git status --short
+git pull --ff-only
+if ($LASTEXITCODE -ne 0) { throw "Git update failed. Review local changes." }
+uv sync --locked
+if ($LASTEXITCODE -ne 0) { throw "Dependency sync failed. Keep MCP stopped and resolve the error." }
 ```
 
-Restart the MCP client after updating. If you start the server with `uv run`,
-dependencies are synchronized on the next launch.
+If you do not use `uv`, replace `uv sync --locked` with
+`& .\.venv\Scripts\python.exe -m pip install -e .`.
+The pip alternative does not use the versions pinned in `uv.lock`.
+Developers who need test dependencies should use `uv sync --locked --extra test`.
+Only after all steps succeed, start the MCP client and reconnect the server.
 
 ---
 

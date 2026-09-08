@@ -909,26 +909,46 @@ async def _read_page_string(connection: Any, expression: str) -> str:
         await _cdp_call(connection, "Runtime.releaseObject", {"objectId": object_id})
 
 
-async def _wait_ready(connection: Any) -> None:
-    deadline = time.monotonic() + 25
-    stable = 0
-    previous = -1
+async def _wait_ready(connection: Any) -> str | None:
+    started = time.monotonic()
+    deadline = started + 25
+    stable_since = started
+    previous = None
+    missing_post = False
     while time.monotonic() < deadline:
         try:
             state = await _evaluate(
                 connection,
-                "JSON.stringify({ready:document.readyState,href:location.href,n:(document.body?.innerText||'').length})",
+                r"""JSON.stringify((() => {
+                  const text = document.body?.innerText || '';
+                  const match = location.pathname.match(/\/status\/(\d+)/);
+                  const isPost = /^(www\.|mobile\.)?(x\.com|twitter\.com)$/.test(location.hostname) && !!match;
+                  const postReady = !isPost || [...document.querySelectorAll('article')].some(article =>
+                    [...article.querySelectorAll('a[href]')].some(a =>
+                      a.pathname.match(/\/status\/(\d+)/)?.[1] === match[1]) &&
+                    !!article.querySelector('[data-testid="tweetText"], [data-testid="tweetPhoto"], video'));
+                  const loading = /^(loading|please wait|読み込み中|読込中|しばらくお待ちください)[\s.!…。、]*$/i.test(text.trim()) ||
+                    !!document.querySelector('[aria-busy="true"]');
+                  return {ready:document.readyState, href:location.href, text, postReady, loading};
+                })())""",
             )
             parsed = json.loads(state)
-            size = int(parsed.get("n", 0))
-            stable = stable + 1 if size == previous and size > 0 else 0
-            previous = size
-            if parsed.get("ready") in {"interactive", "complete"} and stable >= 1:
+            now = time.monotonic()
+            current = (parsed.get("href"), parsed.get("text", ""))
+            if current != previous:
+                stable_since = now
+            previous = current
+            missing_post = not parsed.get("postReady", True)
+            if (parsed.get("ready") == "complete" and current[1]
+                    and now - started >= 2.5 and now - stable_since >= 1.0
+                    and not missing_post and not parsed.get("loading", False)):
                 return
         except (RuntimeError, ValueError, TypeError, json.JSONDecodeError):
             pass
         await asyncio.sleep(0.25)
-    raise TimeoutError("Google page did not finish rendering")
+    if missing_post:
+        return "The requested X post body was not confirmed within 25 seconds. Returned content may be a loading, login, or unavailable-page message; do not treat it as the post body."
+    raise TimeoutError("Page did not finish rendering within 25 seconds")
 
 
 async def _click_google_consent(connection: Any) -> bool:
@@ -1082,7 +1102,10 @@ def _captcha_detail_for_mode() -> str:
         )
     return (
         "Google CAPTCHA detected in a hidden or headless Chrome window. "
-        "Restart with show_browser=true, solve it, then retry the same search."
+        "Set CW_DISPLAY_MODE=native in the MCP client's server environment and restart. "
+        "This overrides show_browser. Run the search again, solve the challenge in "
+        "the visible Chrome window, then retry. If CW_DISPLAY_MODE is unset, "
+        "show_browser=true also enables a visible window."
     )
 
 
@@ -1250,7 +1273,7 @@ async def _fetch_page(url: str, char_limit: int, format: str = "text") -> dict:
         await _cdp_call(page, "Page.enable")
         await _cdp_call(page, "Runtime.enable")
         await _cdp_call(page, "Page.navigate", {"url": validated})
-        await _wait_ready(page)
+        readiness_warning = await _wait_ready(page)
         # Output policy; the proxy enforces network policy before connection.
         final_url = str(await _evaluate(page, "location.href"))
         _validate_public_url(final_url)
@@ -1260,6 +1283,8 @@ async def _fetch_page(url: str, char_limit: int, format: str = "text") -> dict:
             "final_url": final_url,
             "redirected": validated != final_url,
         }
+        if readiness_warning:
+            payload["warning"] = readiness_warning
         if format == "text":
             raw = await _read_page_string(page, _FETCH_TEXT_JS)
             data = json.loads(raw or "{}")

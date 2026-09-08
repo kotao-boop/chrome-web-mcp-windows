@@ -338,3 +338,36 @@ def test_rate_limiter_ignores_non_finite_env_delays(monkeypatch):
     limiter = server.SharedSearchRateLimiter()
     assert limiter.min_delay == float(server.CONFIG["min_delay"])
     assert limiter.max_delay == float(server.CONFIG["max_delay"])
+
+
+@pytest.mark.parametrize("arrival", [4.0, None])
+def test_post_readiness_waits_for_body_or_warns(monkeypatch, arrival):
+    clock = [0.0]
+
+    async def sleep(seconds):
+        clock[0] += seconds
+
+    async def evaluate(conn, expression):
+        ready = arrival is not None and clock[0] >= arrival
+        return json.dumps({"ready": "complete", "href": "https://x.com/user/status/123",
+                           "text": "Actual post" if ready else "Loading...",
+                           "postReady": ready})
+
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(server.asyncio, "sleep", sleep)
+    monkeypatch.setattr(server, "_evaluate", evaluate)
+    warning = asyncio.run(server._wait_ready(None))
+    if arrival is None:
+        assert clock[0] == 25
+        assert "not confirmed" in warning
+    else:
+        assert clock[0] >= arrival + 1
+        assert warning is None
+
+
+@pytest.mark.parametrize("mode", ["hidden", "headless"])
+def test_captcha_help_respects_environment_override(monkeypatch, mode):
+    monkeypatch.setattr(server._RUNTIME, "display_mode", mode)
+    message = server._captcha_detail_for_mode()
+    assert "CW_DISPLAY_MODE=native" in message
+    assert "overrides show_browser" in message

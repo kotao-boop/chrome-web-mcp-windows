@@ -275,6 +275,11 @@ URLは公開アドレスだけを取得できます。`localhost`、プライベ
 ホスト、認証情報を含むURLなどは拒否されます。レスポンスには最終URL、リダイレクトの有無、
 総文字数、切り詰めの有無、本文の抽出方法も含まれます。
 
+本文は最低2.5秒待ち、表示内容が1秒以上変わらなくなってから取得します。Xの投稿URLでは、
+対象の投稿本文または画像・動画の表示も確認します。25秒以内に確認できなかった場合は、
+取得できた画面の内容に加えて`data.warning`を返します。この場合、返された内容を投稿本文と
+断定しないでください。すべてのサイトの遅延読み込みを保証するものではありません。
+
 ---
 
 ### 3. `health_check`（稼働状態確認）
@@ -397,7 +402,9 @@ chrome-web-mcp
 - **ブラウザを表示している場合（`show_browser: true`）**: 開いているChromeウィンドウを
   操作し、自分で画像認証を完了してから、同じ検索をもう一度実行してください。
 - **ブラウザを非表示にしている場合（`show_browser: false`）**: 自動的には解除できないため、
-  数分待って再試行するか、`show_browser: true`に変更して再起動してください。
+  数分待って再試行するか、MCPクライアントのサーバー設定で`CW_DISPLAY_MODE`を`native`に変更し、
+  再起動してください。`CW_DISPLAY_MODE`を指定していない場合は、`show_browser: true`でも
+  表示できます。再起動後に検索を実行し、認証画面が出たら手動で解除して再試行してください。
 
 ---
 
@@ -441,14 +448,25 @@ chrome-web-mcp
 ローカルの変更を確認してから、更新内容を取得します。`reset --hard`は作業内容を失う
 おそれがあるため使用しません。
 
+最初に、この実行ファイルを使うすべてのMCPサーバーを停止してください。サーバーだけを停止
+できない場合は、使用中のAIクライアントを終了します。Windowsでは起動中の実行ファイルを
+置き換えられません。以下は別のPowerShellで実行し、パスを実際の導入先に合わせてください。
+
 ```powershell
-git -C "C:\Users\YOU\chrome-web-mcp" fetch origin
-git -C "C:\Users\YOU\chrome-web-mcp" pull --ff-only
-& "C:\Users\YOU\chrome-web-mcp-windows\.venv\Scripts\python.exe" -m pip install -e "C:\Users\YOU\chrome-web-mcp-windows[test]"
+$repoPath = "C:\Users\YOU\chrome-web-mcp-windows"
+Set-Location -LiteralPath $repoPath
+git status --short
+git pull --ff-only
+if ($LASTEXITCODE -ne 0) { throw "Gitの更新に失敗しました。変更を確認してください。" }
+uv sync --locked
+if ($LASTEXITCODE -ne 0) { throw "依存関係の同期に失敗しました。MCPは停止したまま原因を確認してください。" }
 ```
 
-更新後はMCPクライアントを再起動してください。`uv run`で起動している場合は、次回起動時に
-依存関係が同期されます。
+`uv`を使用していない場合は、`uv sync --locked`の代わりに
+`& .\.venv\Scripts\python.exe -m pip install -e .`を実行してください。
+このpipの方法では`uv.lock`の固定バージョンは使用されません。
+テスト用依存関係も必要な開発者は`uv sync --locked --extra test`を使用します。
+すべて成功してからMCPクライアントを起動し、サーバーを再接続してください。
 
 ---
 
