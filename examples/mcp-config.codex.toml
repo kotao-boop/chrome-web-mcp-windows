@@ -3,9 +3,9 @@
 # C:\Users\YOU with the account and checkout path on your machine.
 
 [mcp_servers.chrome-web]
-command = 'C:\Users\YOU\chrome-web-mcp\.venv\Scripts\chrome-web-mcp.exe'
+command = 'C:\Users\YOU\chrome-web-mcp-windows\.venv\Scripts\chrome-web-mcp.exe'
 args = []
-cwd = 'C:\Users\YOU\chrome-web-mcp'
+cwd = 'C:\Users\YOU\chrome-web-mcp-windows'
 startup_timeout_sec = 30
 tool_timeout_sec = 120
 enabled = true

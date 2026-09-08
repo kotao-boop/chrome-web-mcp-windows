@@ -21,7 +21,6 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-
 MANIFEST_URL = (
     "https://googlechromelabs.github.io/chrome-for-testing/"
     "last-known-good-versions-with-downloads.json"
@@ -34,6 +33,7 @@ ALLOWED_DOWNLOAD_HOSTS = {
 MAX_DOWNLOAD_BYTES = 1024 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 2 * 1024 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 50_000
+MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 
 
 def _cft_platform() -> str:
@@ -73,6 +73,43 @@ def _validate_download_url(url: str) -> None:
         raise RuntimeError("Chrome for Testing download URL is not an allowed HTTPS Google URL")
 
 
+def _validate_manifest_url(url: str) -> None:
+    """Allow only the fixed official Chrome for Testing manifest URL."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError("Chrome for Testing manifest URL is malformed") from exc
+    if (
+        parsed.scheme.lower() != "https"
+        or host != "googlechromelabs.github.io"
+        or port is not None
+        or parsed.path != "/chrome-for-testing/last-known-good-versions-with-downloads.json"
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise RuntimeError("Chrome for Testing manifest URL is not the official HTTPS URL")
+
+
+class _ValidatedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Validate every redirect instead of trusting urllib's automatic follow."""
+
+    def __init__(self, validator):
+        self._validator = validator
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        self._validator(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open_validated(request, *, timeout: int, validator):
+    opener = urllib.request.build_opener(_ValidatedRedirectHandler(validator))
+    return opener.open(request, timeout=timeout)
+
+
 def _select_download(payload: dict, channel: str, cft_platform: str) -> tuple[str, str]:
     try:
         entry = payload["channels"][channel]
@@ -90,10 +127,14 @@ def _select_download(payload: dict, channel: str, cft_platform: str) -> tuple[st
 
 
 def _read_manifest(url: str) -> dict:
+    _validate_manifest_url(url)
     request = urllib.request.Request(url, headers={"User-Agent": "chrome-web-mcp-cft-installer"})
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.load(response)
+        with _open_validated(request, timeout=30, validator=_validate_manifest_url) as response:
+            raw = response.read(MAX_MANIFEST_BYTES + 1)
+            if len(raw) > MAX_MANIFEST_BYTES:
+                raise RuntimeError("Chrome for Testing manifest is too large")
+            return json.loads(raw)
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"Could not read Chrome for Testing manifest: {exc}") from exc
 
@@ -138,7 +179,7 @@ def _download_archive(url: str, archive: Path) -> None:
         headers={"User-Agent": "chrome-web-mcp-cft-installer"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with _open_validated(request, timeout=120, validator=_validate_download_url) as response:
             declared = response.headers.get("Content-Length")
             if declared:
                 try:

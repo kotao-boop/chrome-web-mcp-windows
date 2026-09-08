@@ -14,6 +14,10 @@ This file preserves the upstream notice so that the origin and applicable
 license terms remain clear. The current project is a substantial reimplementation
 based on that starting point, not the original `ds4` project.
 
+This is an independent Windows-focused repository. Please direct support
+questions and Windows-specific bug reports to this repository's Issues rather
+than to the upstream projects.
+
 ds4 is licensed under the MIT License:
 
 ```text

@@ -14,8 +14,8 @@ import sys
 import threading
 import time
 from pathlib import Path
-import psutil
 
+import psutil
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 LOCAL_CHROME_DIR = PROJECT_ROOT / ".local-chrome"
@@ -475,7 +475,6 @@ class WindowsJob:
     def assign(self, pid: int) -> None:
         if not self.handle:
             return
-        import ctypes
 
         process = self._kernel32.OpenProcess(0x0001 | 0x0100, False, pid)  # TERMINATE | SET_QUOTA
         if not process:

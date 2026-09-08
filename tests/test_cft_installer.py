@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pytest
 
-
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "install-chrome-for-testing.py"
 SPEC = importlib.util.spec_from_file_location("chrome_web_mcp_cft_installer", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
@@ -65,6 +64,25 @@ def test_selects_requested_channel_and_platform():
 def test_download_url_must_be_allowed_https_google_storage(url):
     with pytest.raises(RuntimeError, match="allowed HTTPS Google URL"):
         installer._validate_download_url(url)
+
+
+def test_redirect_handler_revalidates_each_download_target():
+    handler = installer._ValidatedRedirectHandler(installer._validate_download_url)
+    with pytest.raises(RuntimeError, match="allowed HTTPS Google URL"):
+        handler.redirect_request(
+            None,
+            None,
+            302,
+            "Found",
+            {},
+            "https://example.test/chrome.zip",
+        )
+
+
+def test_manifest_url_is_fixed_to_the_official_endpoint():
+    installer._validate_manifest_url(installer.MANIFEST_URL)
+    with pytest.raises(RuntimeError, match="official HTTPS URL"):
+        installer._validate_manifest_url("https://example.test/manifest.json")
 
 
 def test_cft_installer_is_windows_only(monkeypatch):

@@ -4,12 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chrome-web-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "Safe JavaScript-rendered Google search and public URL fetch MCP server"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
-authors = [{ name = "kuraneko1" }]
+authors = [{ name = "kotao-boop" }]
+maintainers = [{ name = "kotao-boop" }]
 keywords = ["chrome", "mcp", "browser", "web", "google-search"]
 classifiers = [
   "License :: OSI Approved :: MIT License",
@@ -19,7 +20,7 @@ classifiers = [
   "Topic :: Internet :: WWW/HTTP",
 ]
 dependencies = [
-  "mcp==1.28.0",
+  "mcp==1.28.1",
   "httpx==0.28.1",
   "websockets==16.0",
   "trafilatura>=2.2.0",
@@ -32,6 +33,7 @@ Homepage = "https://github.com/kotao-boop/chrome-web-mcp-windows"
 Repository = "https://github.com/kotao-boop/chrome-web-mcp-windows"
 Issues = "https://github.com/kotao-boop/chrome-web-mcp-windows/issues"
 Changelog = "https://github.com/kotao-boop/chrome-web-mcp-windows/releases"
+Upstream = "https://github.com/kuraneko1/chrome-web-mcp"
 
 [project.scripts]
 chrome-web-mcp = "chrome_web_mcp.server:run"

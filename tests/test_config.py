@@ -59,6 +59,13 @@ def test_bad_values_fall_back_per_key(monkeypatch, tmp_path, capsys):
     assert "bogus_key" in capsys.readouterr().err
 
 
+def test_non_finite_delays_fall_back_to_defaults(monkeypatch, tmp_path, capsys):
+    path = write_config(tmp_path, {"min_delay": float("nan"), "max_delay": float("inf")})
+    monkeypatch.setenv("CW_CONFIG", path)
+    assert server._load_config() == server._CONFIG_DEFAULTS
+    assert "non-negative number" in capsys.readouterr().err
+
+
 def test_broken_json_falls_back_to_defaults(monkeypatch, tmp_path):
     path = tmp_path / "config.json"
     path.write_text("{not json", encoding="utf-8")

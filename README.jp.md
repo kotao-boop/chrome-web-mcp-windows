@@ -79,180 +79,91 @@ Windows 10およびWindows 11で動作します。
 
 ## クイックスタート（導入手順）
 
-### 方式A: `uvx`を利用する場合（推奨）
+このWindows版は、このGitHubリポジトリとGitHub Releasesから配布しています。最も確実な方法は、
+ローカルの仮想環境にインストールした実行ファイルを使うことです。こうすると、すべてのMCP
+クライアントが同じ検証済みのコピーを利用できます。
 
-`uv`がインストールされている場合は、手動で仮想環境を作らずにMCPクライアントの
-設定から公開パッケージを取得して起動できます。安定したバージョンを使うため、ここでは
-`0.2.0`を指定しています。公開するバージョンに合わせて番号を変更してください。
+### 1. ローカルの作業コピーを準備する
 
-#### Cursorでの設定例
-
-`%USERPROFILE%\.cursor\mcp.json`、またはCursorの「設定」→「MCP」に追加します。コピーして
-使えるファイルは[`examples/mcp-config.uvx.json`](examples/mcp-config.uvx.json)です。
-
-```json
-{
-  "mcpServers": {
-    "chrome-web": {
-      "command": "uvx",
-      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
-    }
-  }
-}
-```
-
-#### Claude Desktopでの設定例
-
-`%APPDATA%\Claude\claude_desktop_config.json`に追加します。コピーして使えるファイルは
-[`examples/mcp-config.uvx.json`](examples/mcp-config.uvx.json)です。
-
-```json
-{
-  "mcpServers": {
-    "chrome-web": {
-      "command": "uvx",
-      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
-    }
-  }
-}
-```
-
-#### VS Code / GitHub Copilotでの設定例
-
-プロジェクト単位で設定する場合は、プロジェクトフォルダー内に`.vscode/mcp.json`を
-作成します。ユーザー共通で設定する場合は、コマンドパレットから「MCP: Open User
-Configuration」を実行します。次の内容を追加、または既存の設定に統合してください。
-コピーして使えるファイルは[`examples/mcp-config.vscode.json`](examples/mcp-config.vscode.json)です。
-
-```json
-{
-  "servers": {
-    "chrome-web": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
-    }
-  }
-}
-```
-
-#### Google Antigravity CLIでの設定例
-
-現在のGoogle CLIはAntigravity CLIです。Gemini CLIから移行する場合は、Google公式の
-[移行ガイド](https://antigravity.google/docs/cli/gcli-migration)を参照してください。
-Antigravity CLIでは、全体設定の`%USERPROFILE%\.gemini\config\mcp_config.json`に、次の設定を
-追加または統合します。プロジェクト単位で設定する場合は、プロジェクトフォルダー内の
-`.agents\mcp_config.json`に同じ内容を保存します。Antigravity IDEでも同じ`mcp_config.json`
-形式を使います。詳しくはGoogle公式の
-[Antigravity MCPガイド](https://antigravity.google/docs/cli/mcp/)を参照してください。コピーして
-使えるファイルは
-[`examples/mcp-config.antigravity.json`](examples/mcp-config.antigravity.json)です。
-
-```json
-{
-  "mcpServers": {
-    "chrome-web": {
-      "command": "uvx",
-      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
-    }
-  }
-}
-```
-
-#### Windsurf（Cascade）での設定例
-
-`%USERPROFILE%\.codeium\windsurf\mcp_config.json`に追加または統合します。
-Windsurfの「Settings」→「Cascade」→「MCP Servers」→「View Raw Config」から設定ファイルを
-開くこともできます。コピーして使えるファイルは
-[`examples/mcp-config.windsurf.json`](examples/mcp-config.windsurf.json)です。
-
-```json
-{
-  "mcpServers": {
-    "chrome-web": {
-      "command": "uvx",
-      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
-    }
-  }
-}
-```
-
-#### OpenCodeでの設定例
-
-プロジェクトの`opencode.jsonc`に、次のサーバー設定を追加します。すでに設定がある場合は、
-内容を消さずに統合してください。コピーして使えるファイルは
-[`examples/mcp-config.opencode.jsonc`](examples/mcp-config.opencode.jsonc)です。
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "servers": {
-      "chrome-web": {
-        "type": "local",
-        "command": ["uvx", "--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
-      }
-    }
-  }
-}
-```
-
-上の例は、公開パッケージを使う設定です。`uvx`を使うため、`uv`にPATHが通っている必要が
-あります。ローカルのソースコードを使う場合は、`uvx`の部分を仮想環境の実行ファイルに
-置き換えてください。
-
-- Cursor、Claude Desktop、Antigravity CLI、Windsurfなど`mcpServers`を使うクライアント:
-  `command`を`C:\\Users\\YOU\\chrome-web-mcp\\.venv\\Scripts\\chrome-web-mcp.exe`に
-  変更し、`args`を削除します。
-- VS Code: 同じ実行ファイルを`command`に指定し、`type`は`"stdio"`のまま、`args`は`[]`に
-  します。
-- OpenCode: `command`を、例えば
-  `["C:\\Users\\YOU\\chrome-web-mcp\\.venv\\Scripts\\chrome-web-mcp.exe"]`のような
-  1要素の配列に変更します。
-
----
-
-### 方式B: ソースコードからローカルでセットアップする場合
-
-GitHubからソースコードを取得して使う場合は、次の手順で専用環境を構築します。
-
-1. コマンドプロンプトまたはPowerShellで、仮想環境を作成して依存関係をインストールします。
+リポジトリを取得し、コマンドプロンプトまたはPowerShellで実行環境を作成します。
 
 ```bat
+git clone https://github.com/kotao-boop/chrome-web-mcp-windows.git
+cd chrome-web-mcp-windows
 python -m venv .venv
 .venv\Scripts\activate
-python -m pip install -e ".[test]"
+python -m pip install -e .
 ```
 
-2. PCにGoogle Chromeがインストールされていない場合は、Chrome for Testingを配置します。
-   すでにGoogle Chromeがある場合、この手順は不要です。
+PCにGoogle Chromeがインストールされていない場合は、次のコマンドでChrome for Testingを配置
+できます。対応するGoogle ChromeまたはChromiumがすでにある場合は、この手順は不要です。
 
 ```bat
 python scripts\install-chrome-for-testing.py
 ```
 
-3. MCPクライアントの設定ファイルに、作成した実行ファイルの絶対パスを記述します。
+### 2. MCPクライアントを設定する
+
+仮想環境内の実行ファイルを、絶対パスで指定します。`YOU`をWindowsのユーザー名に置き換え、
+必要であれば作業フォルダーの部分も変更してください。
 
 ```json
 {
   "mcpServers": {
     "chrome-web": {
-      "command": "C:\\Users\\YOU\\chrome-web-mcp\\.venv\\Scripts\\chrome-web-mcp.exe"
+      "command": "C:\\Users\\YOU\\chrome-web-mcp-windows\\.venv\\Scripts\\chrome-web-mcp.exe"
     }
   }
 }
 ```
 
+リポジトリには、主要なWindows向けMCPクライアント用の設定例を用意しています。既存の設定を
+全部消さず、該当するサーバー項目だけを追加・統合してください。
+
+#### Cursor / Claude Desktop
+
+[`examples/mcp-config.windows.json`](examples/mcp-config.windows.json)を、Cursorの
+`%USERPROFILE%\.cursor\mcp.json`またはClaude Desktopの
+`%APPDATA%\Claude\claude_desktop_config.json`に統合します。
+
+#### VS Code / GitHub Copilot
+
+プロジェクト内の`.vscode/mcp.json`を作成・編集するか、コマンドパレットから
+`MCP: Open User Configuration`を実行します。設定例は
+[`examples/mcp-config.vscode.json`](examples/mcp-config.vscode.json)です。
+
+#### Google Antigravity CLI
+
+現在のGoogleのターミナルエージェントはAntigravity CLIです。Gemini CLIから移行する場合は、
+Google公式の[移行ガイド](https://antigravity.google/docs/cli/gcli-migration)を参照してください。
+[`examples/mcp-config.antigravity.json`](examples/mcp-config.antigravity.json)を、全体設定の
+`%USERPROFILE%\.gemini\config\mcp_config.json`に統合します。プロジェクト単位で設定する場合は、
+同じ項目をプロジェクト内の`.agents\mcp_config.json`に保存します。Antigravity IDEでも同じ
+`mcp_config.json`形式を使います。詳しくはGoogle公式の
+[Antigravity MCPガイド](https://antigravity.google/docs/cli/mcp/)を参照してください。
+
+#### Windsurf（Cascade）
+
+[`examples/mcp-config.windsurf.json`](examples/mcp-config.windsurf.json)を、
+`%USERPROFILE%\.codeium\windsurf\mcp_config.json`に統合します。Windsurfの「Settings」→
+「Cascade」→「MCP Servers」→「View Raw Config」から設定ファイルを開くこともできます。
+
+#### OpenCode
+
+プロジェクトの`opencode.jsonc`に、
+[`examples/mcp-config.opencode.jsonc`](examples/mcp-config.opencode.jsonc)を統合します。
+OpenCodeでは、実行ファイルのパスを1要素の`command`配列で指定します。
+
 #### Codexでの設定例
 
-Codex DesktopまたはCodex CLIでは、`%USERPROFILE%\.codex\config.toml`に次の設定を
-追加します。`YOU`の部分は自分のユーザー名に置き換えてください。
+Codex DesktopまたはCodex CLIでは、[`examples/mcp-config.codex.toml`](examples/mcp-config.codex.toml)の
+内容を`%USERPROFILE%\.codex\config.toml`に追加します。`YOU`の部分は自分のユーザー名に置き換えてください。
 
 ```toml
 [mcp_servers.chrome-web]
-command = 'C:\Users\YOU\chrome-web-mcp\.venv\Scripts\chrome-web-mcp.exe'
+command = 'C:\Users\YOU\chrome-web-mcp-windows\.venv\Scripts\chrome-web-mcp.exe'
 args = []
-cwd = 'C:\Users\YOU\chrome-web-mcp'
+cwd = 'C:\Users\YOU\chrome-web-mcp-windows'
 startup_timeout_sec = 30
 tool_timeout_sec = 120
 enabled = true
@@ -533,7 +444,7 @@ chrome-web-mcp
 ```powershell
 git -C "C:\Users\YOU\chrome-web-mcp" fetch origin
 git -C "C:\Users\YOU\chrome-web-mcp" pull --ff-only
-& "C:\Users\YOU\chrome-web-mcp\.venv\Scripts\python.exe" -m pip install -e "C:\Users\YOU\chrome-web-mcp[test]"
+& "C:\Users\YOU\chrome-web-mcp-windows\.venv\Scripts\python.exe" -m pip install -e "C:\Users\YOU\chrome-web-mcp-windows[test]"
 ```
 
 更新後はMCPクライアントを再起動してください。`uv run`で起動している場合は、次回起動時に
@@ -574,6 +485,10 @@ Gitの履歴には、次の著者名と開発の経緯が記録されていま�
 元のコードを単に再配布するものではなく、検索、公開URL取得、本文整形、安全な接続確認、
 レート制限、WindowsのChrome起動・終了処理などを追加・再設計しています。
 基礎となるアイデアを提供した先行開発者と、ds4.c・ggmlの貢献者に感謝します。
+
+このWindows版に関する質問や不具合報告は、このリポジトリの
+[Issues](https://github.com/kotao-boop/chrome-web-mcp-windows/issues)を利用してください。
+Windows版固有の問い合わせを、元プロジェクトへ送らないようにしてください。
 
 ---
 

@@ -86,187 +86,97 @@ It provides three main tools:
 
 ## Quickstart
 
-### Option A: Use `uvx` (recommended)
+This Windows edition is distributed through this GitHub repository and its
+GitHub Releases. The most predictable setup is to run the executable from a
+local virtual environment, so every MCP client uses the same checked-out copy.
 
-If `uv` is installed, an MCP client can download the published package and
-start it without a manually created virtual environment. The examples pin
-version `0.2.0`; change the version to the release you want to use.
+### 1. Set up a local checkout
 
-#### Cursor example
-
-Add this to `%USERPROFILE%\.cursor\mcp.json`, or add it in Cursor's
-Settings -> MCP screen. A copy-ready version is available at
-[`examples/mcp-config.uvx.json`](examples/mcp-config.uvx.json):
-
-```json
-{
-  "mcpServers": {
-    "chrome-web": {
-      "command": "uvx",
-      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
-    }
-  }
-}
-```
-
-#### Claude Desktop example
-
-Add the same server entry to
-`%APPDATA%\Claude\claude_desktop_config.json`. A copy-ready version is
-available at [`examples/mcp-config.uvx.json`](examples/mcp-config.uvx.json):
-
-```json
-{
-  "mcpServers": {
-    "chrome-web": {
-      "command": "uvx",
-      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
-    }
-  }
-}
-```
-
-#### VS Code / GitHub Copilot example
-
-For a workspace-specific setup, create `.vscode/mcp.json` in the project folder.
-For a user-wide setup, run `MCP: Open User Configuration` from the Command
-Palette. Add or merge this entry. A copy-ready version is available at
-[`examples/mcp-config.vscode.json`](examples/mcp-config.vscode.json).
-
-```json
-{
-  "servers": {
-    "chrome-web": {
-      "type": "stdio",
-      "command": "uvx",
-      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
-    }
-  }
-}
-```
-
-#### Google Antigravity CLI example
-
-Antigravity CLI is Google's current terminal agent. If you are moving from
-Gemini CLI, use Google's [migration guide](https://antigravity.google/docs/cli/gcli-migration).
-For Antigravity CLI, merge this entry into the global configuration at
-`%USERPROFILE%\.gemini\config\mcp_config.json`. For a project-only setup, put
-the same file at `.agents\mcp_config.json` inside the workspace. The same
-`mcp_config.json` format is used by Antigravity IDE. See Google's
-[Antigravity MCP guide](https://antigravity.google/docs/cli/mcp/) for current
-details. A copy-ready version is available at
-[`examples/mcp-config.antigravity.json`](examples/mcp-config.antigravity.json).
-
-```json
-{
-  "mcpServers": {
-    "chrome-web": {
-      "command": "uvx",
-      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
-    }
-  }
-}
-```
-
-#### Windsurf (Cascade) example
-
-Merge this entry into
-`%USERPROFILE%\.codeium\windsurf\mcp_config.json`. You can also open the
-file from Windsurf Settings -> Cascade -> MCP Servers -> View Raw Config. A
-copy-ready version is available at
-[`examples/mcp-config.windsurf.json`](examples/mcp-config.windsurf.json).
-
-```json
-{
-  "mcpServers": {
-    "chrome-web": {
-      "command": "uvx",
-      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
-    }
-  }
-}
-```
-
-#### OpenCode example
-
-Add this server to `opencode.jsonc` in your workspace (or merge it into your
-existing OpenCode configuration). A copy-ready version is available at
-[`examples/mcp-config.opencode.jsonc`](examples/mcp-config.opencode.jsonc):
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "servers": {
-      "chrome-web": {
-        "type": "local",
-        "command": ["uvx", "--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
-      }
-    }
-  }
-}
-```
-
-All examples above use the published package. They require `uv` to be
-available on `PATH`. If you use a local checkout instead, replace the `uvx`
-command with the executable from your virtual environment:
-
-- `mcpServers` clients (Cursor, Claude Desktop, Antigravity CLI, and Windsurf): use
-  `C:\\Users\\YOU\\chrome-web-mcp\\.venv\\Scripts\\chrome-web-mcp.exe` as
-  `command` and remove the `args` entry.
-- VS Code: use the same executable as `command`, keep `type: "stdio"`, and set
-  `args` to `[]`.
-- OpenCode: use an array containing the executable path, for example
-  `["C:\\Users\\YOU\\chrome-web-mcp\\.venv\\Scripts\\chrome-web-mcp.exe"]`.
-
----
-
-### Option B: Set up a local checkout
-
-Use these steps when you want to run the source code from a GitHub checkout.
-
-1. Create a virtual environment and install the package from Command Prompt or
-   PowerShell:
+Clone the repository and install the runtime dependencies from Command Prompt
+or PowerShell:
 
 ```bat
+git clone https://github.com/kotao-boop/chrome-web-mcp-windows.git
+cd chrome-web-mcp-windows
 python -m venv .venv
 .venv\Scripts\activate
-python -m pip install -e ".[test]"
+python -m pip install -e .
 ```
 
-2. If Google Chrome is not already installed, place a project-local Chrome for
-   Testing build:
+If Google Chrome is not already installed, place a project-local Chrome for
+Testing build with the following command. This step is not needed when a
+supported Chrome or Chromium installation is already available:
 
 ```bat
 python scripts\install-chrome-for-testing.py
 ```
 
-   This step is not needed when a supported Chrome installation is already
-   available.
+### 2. Add the MCP client configuration
 
-3. Add the executable path to the MCP client configuration. Replace `YOU` with
-   your Windows user name and adjust the checkout path if needed:
+Use the absolute path to the executable inside the virtual environment. Replace
+`YOU` with your Windows user name and adjust the checkout path if needed:
 
 ```json
 {
   "mcpServers": {
     "chrome-web": {
-      "command": "C:\\Users\\YOU\\chrome-web-mcp\\.venv\\Scripts\\chrome-web-mcp.exe"
+      "command": "C:\\Users\\YOU\\chrome-web-mcp-windows\\.venv\\Scripts\\chrome-web-mcp.exe"
     }
   }
 }
 ```
 
+The repository includes copy-ready examples for the main Windows MCP clients.
+Merge the relevant entry into your existing configuration instead of replacing
+the whole file.
+
+#### Cursor and Claude Desktop
+
+Use [`examples/mcp-config.windows.json`](examples/mcp-config.windows.json) in
+`%USERPROFILE%\.cursor\mcp.json` or
+`%APPDATA%\Claude\claude_desktop_config.json`.
+
+#### VS Code / GitHub Copilot
+
+Create or edit `.vscode/mcp.json` in the workspace, or run
+`MCP: Open User Configuration` from the Command Palette. Use
+[`examples/mcp-config.vscode.json`](examples/mcp-config.vscode.json).
+
+#### Google Antigravity CLI
+
+Antigravity CLI is Google's current terminal agent. If you are moving from
+Gemini CLI, use Google's [migration guide](https://antigravity.google/docs/cli/gcli-migration).
+Merge [`examples/mcp-config.antigravity.json`](examples/mcp-config.antigravity.json)
+into the global configuration at
+`%USERPROFILE%\.gemini\config\mcp_config.json`. For a project-only setup, put
+the same entry at `.agents\mcp_config.json`. Antigravity IDE uses the same
+`mcp_config.json` format; see Google's
+[Antigravity MCP guide](https://antigravity.google/docs/cli/mcp/) for current
+details.
+
+#### Windsurf (Cascade)
+
+Merge [`examples/mcp-config.windsurf.json`](examples/mcp-config.windsurf.json)
+into `%USERPROFILE%\.codeium\windsurf\mcp_config.json`. You can also open the
+file from Windsurf Settings -> Cascade -> MCP Servers -> View Raw Config.
+
+#### OpenCode
+
+Add [`examples/mcp-config.opencode.jsonc`](examples/mcp-config.opencode.jsonc)
+to `opencode.jsonc` in your workspace. OpenCode expects the executable path in
+a one-element `command` array.
+
 #### Codex example
 
-For Codex Desktop or Codex CLI, add the following to
+For Codex Desktop or Codex CLI, add
+[`examples/mcp-config.codex.toml`](examples/mcp-config.codex.toml) to
 `%USERPROFILE%\.codex\config.toml`. Replace `YOU` with your Windows user name.
 
 ```toml
 [mcp_servers.chrome-web]
-command = 'C:\Users\YOU\chrome-web-mcp\.venv\Scripts\chrome-web-mcp.exe'
+command = 'C:\Users\YOU\chrome-web-mcp-windows\.venv\Scripts\chrome-web-mcp.exe'
 args = []
-cwd = 'C:\Users\YOU\chrome-web-mcp'
+cwd = 'C:\Users\YOU\chrome-web-mcp-windows'
 startup_timeout_sec = 30
 tool_timeout_sec = 120
 enabled = true
@@ -561,7 +471,7 @@ discard work.
 ```powershell
 git -C "C:\Users\YOU\chrome-web-mcp" fetch origin
 git -C "C:\Users\YOU\chrome-web-mcp" pull --ff-only
-& "C:\Users\YOU\chrome-web-mcp\.venv\Scripts\python.exe" -m pip install -e "C:\Users\YOU\chrome-web-mcp[test]"
+& "C:\Users\YOU\chrome-web-mcp-windows\.venv\Scripts\python.exe" -m pip install -e "C:\Users\YOU\chrome-web-mcp-windows[test]"
 ```
 
 Restart the MCP client after updating. If you start the server with `uv run`,
@@ -610,6 +520,10 @@ reworks search, public-URL fetching, readable content extraction, safe
 connection checks, rate limiting, and Windows Chrome startup and cleanup.
 We thank the earlier contributors and the ds4.c and ggml contributors for the
 foundation and ideas behind this work.
+
+For questions and bug reports about this Windows edition, please use this
+repository's [Issues](https://github.com/kotao-boop/chrome-web-mcp-windows/issues).
+Please do not send Windows-specific support requests to the upstream project.
 
 ---
 

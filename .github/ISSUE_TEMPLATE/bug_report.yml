@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a reproducible problem in the independent Windows edition.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please remove passwords, cookies, tokens, private URLs, and personal data.
+        This repository is independent from the upstream project; report the issue here.
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: Python 3.13.2
+    validations:
+      required: true
+  - type: input
+    id: chrome
+    attributes:
+      label: Chrome or Chromium version
+      placeholder: Google Chrome 150.x
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: MCP client
+      placeholder: Codex, Antigravity CLI, Cursor, Claude Desktop, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the smallest safe example that reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and safe logs
+      description: Remove secrets and private data before posting logs.
+    validations:
+      required: true

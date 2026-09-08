@@ -4,10 +4,11 @@ import os
 import subprocess
 import sys
 import tempfile
+from typing import Any
 
 import pytest
 
-from typing import Any
+from chrome_web_mcp import server
 
 # Use a throwaway Chrome profile/lock so the in-process live test does not
 # collide with a live chrome-web-v2 server holding the default profile lock.
@@ -16,9 +17,6 @@ os.environ["CW_PROFILE_DIR"] = os.path.join(_SANDBOX, "profile")
 os.environ["CW_LOCK_PATH"] = os.path.join(_SANDBOX, ".instance.lock")
 os.environ["CW_RATE_LIMIT_DB"] = os.path.join(_SANDBOX, "rate-limit.sqlite3")
 SYNTHETIC_SECRET = "sk-" + ("a" * 26)
-
-from chrome_web_mcp import server
-
 
 # MCP's @app.list_tools() / @app.call_tool() decorators leak wrapper signatures
 # into static typing, so direct calls trip checkers even though they work at
@@ -120,6 +118,24 @@ def test_normalizes_direct_and_legacy_google_result_links():
 def test_rejects_non_public_or_secret_result_urls(url):
     with pytest.raises(ValueError, match="Blocked"):
         server._validate_public_url(url)
+
+
+def test_sanitize_extracted_links_filters_unsafe_targets(monkeypatch):
+    def fake_validate(url):
+        if "private" in url or "secret" in url:
+            raise ValueError("Blocked")
+        return url
+
+    monkeypatch.setattr(server, "_validate_public_url", fake_validate)
+    assert server._sanitize_extracted_links(
+        [
+            {"text": " Public page ", "url": "https://public.example/page"},
+            {"text": "private", "url": "http://private.example/"},
+            {"text": "secret", "url": "https://public.example/?secret=1"},
+            {"text": "", "url": "https://public.example/empty"},
+            {"text": "wrong shape", "url": 123},
+        ]
+    ) == [{"text": "Public page", "url": "https://public.example/page"}]
 
 
 def test_call_tool_returns_single_structured_json_layer(monkeypatch):
@@ -314,3 +330,11 @@ def test_rate_limiter_honors_env_delays(monkeypatch):
     limiter = server.SharedSearchRateLimiter()
     assert limiter.min_delay == 0.1
     assert limiter.max_delay == 0.2
+
+
+def test_rate_limiter_ignores_non_finite_env_delays(monkeypatch):
+    monkeypatch.setenv("CW_MIN_DELAY", "nan")
+    monkeypatch.setenv("CW_MAX_DELAY", "inf")
+    limiter = server.SharedSearchRateLimiter()
+    assert limiter.min_delay == float(server.CONFIG["min_delay"])
+    assert limiter.max_delay == float(server.CONFIG["max_delay"])

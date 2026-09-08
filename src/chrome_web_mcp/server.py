@@ -16,6 +16,7 @@ import collections
 import ipaddress
 import itertools
 import json
+import math
 import os
 import random
 import re
@@ -37,8 +38,9 @@ import psutil
 import websockets
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from chrome_web_mcp.network import PublicNetworkProxy
+
 from chrome_web_mcp import platform_runtime
+from chrome_web_mcp.network import PublicNetworkProxy
 
 try:
     import trafilatura
@@ -134,6 +136,36 @@ def _validate_public_url(url: str) -> str:
     if not addresses or any(not address.is_global for address in addresses):
         raise ValueError("Blocked: URL resolves to a non-public address")
     return urllib.parse.urlunparse(parsed)
+
+
+def _sanitize_extracted_links(value: Any) -> list[dict[str, str]]:
+    """Keep only labelled, public links before returning page data to the client.
+
+    Links are untrusted page content. Reusing the same public-URL validator as
+    ``fetch_url`` prevents credentials, local destinations, and private-IP
+    targets from being handed to a follow-up tool call.
+    """
+    if not isinstance(value, list):
+        return []
+    safe: list[dict[str, str]] = []
+    for candidate in value:
+        if not isinstance(candidate, dict):
+            continue
+        label = candidate.get("text")
+        raw_url = candidate.get("url")
+        if not isinstance(label, str) or not isinstance(raw_url, str):
+            continue
+        label = " ".join(label.split())
+        if not label:
+            continue
+        try:
+            public_url = _validate_public_url(raw_url)
+        except (ValueError, OSError):
+            continue
+        safe.append({"text": label[:200], "url": public_url})
+        if len(safe) >= 200:
+            break
+    return safe
 
 
 def _normalize_candidate_href(href: str) -> str | None:
@@ -268,6 +300,16 @@ def _warn_config(message: str) -> None:
         pass
 
 
+def _non_negative_finite(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
 def _load_config() -> dict:
     """Load the optional JSON config file; fall back to defaults per key.
 
@@ -329,10 +371,11 @@ def _load_config() -> dict:
     for key in ("min_delay", "max_delay"):
         if key in data:
             value = data[key]
-            if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
-                delays[key] = float(value)
-            else:
+            number = _non_negative_finite(value)
+            if number is None:
                 _warn_config(f"{key} must be a non-negative number; using default")
+            else:
+                delays[key] = number
     if delays:
         lo = delays["min_delay"] if "min_delay" in delays else float(cfg["min_delay"])
         hi = delays["max_delay"] if "max_delay" in delays else float(cfg["max_delay"])
@@ -654,9 +697,10 @@ def _env_float(name: str, default: float) -> float:
     if not raw:
         return default
     try:
-        return float(raw)
-    except ValueError:
-        return default
+        number = _non_negative_finite(float(raw))
+    except (OverflowError, ValueError):
+        number = None
+    return default if number is None else number
 
 
 class SharedSearchRateLimiter:
@@ -675,7 +719,17 @@ class SharedSearchRateLimiter:
             min_delay = _env_float("CW_MIN_DELAY", float(CONFIG["min_delay"]))
         if max_delay is None:
             max_delay = _env_float("CW_MAX_DELAY", float(CONFIG["max_delay"]))
-        if min_delay < 0 or max_delay < min_delay:
+        try:
+            min_delay = float(min_delay)
+            max_delay = float(max_delay)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("invalid search rate-limit delay range") from exc
+        if (
+            not math.isfinite(min_delay)
+            or not math.isfinite(max_delay)
+            or min_delay < 0
+            or max_delay < min_delay
+        ):
             raise ValueError("invalid search rate-limit delay range")
         default_path = Path(tempfile.gettempdir()) / "chrome-web-mcp" / "search-rate-limit.sqlite3"
         configured = os.environ.get("CW_RATE_LIMIT_DB")
@@ -1232,10 +1286,8 @@ async def _fetch_page(url: str, char_limit: int, format: str = "text") -> dict:
             shaped, method = await asyncio.to_thread(_shape_markdown, html, final_url)
             links_raw = await _read_page_string(page, _FETCH_LINKS_JS)
             try:
-                links = json.loads(links_raw or "[]")
+                links = _sanitize_extracted_links(json.loads(links_raw or "[]"))
             except (ValueError, TypeError):
-                links = []
-            if not isinstance(links, list):
                 links = []
             if not shaped:
                 # Shaper saw nothing usable: fall back to the in-page DOM walk
@@ -1248,7 +1300,7 @@ async def _fetch_page(url: str, char_limit: int, format: str = "text") -> dict:
                 shaped = str(data.get("markdown", "") or "")
                 if not links:
                     maybe = data.get("links", [])
-                    links = maybe if isinstance(maybe, list) else []
+                    links = _sanitize_extracted_links(maybe)
                 method = "dom" if shaped.strip() else "none"
             title = " ".join(
                 str(await _evaluate(page, "document.title || ''")).split()
@@ -1262,7 +1314,7 @@ async def _fetch_page(url: str, char_limit: int, format: str = "text") -> dict:
                 "format": format,
                 "formatted": True,
                 "extraction": method,
-                "links": links[:200],
+                "links": links,
             }
             if format == "markdown":
                 entry["markdown"] = cut

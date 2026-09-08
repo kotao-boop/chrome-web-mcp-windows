@@ -16,7 +16,6 @@ import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
 
-
 _TRANSITION_NETWORKS = tuple(ipaddress.ip_network(cidr) for cidr in (
     "64:ff9b::/96", "64:ff9b:1::/48", "2002::/16", "2001::/32",
 ))

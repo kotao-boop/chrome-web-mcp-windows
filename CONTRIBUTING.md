@@ -19,7 +19,8 @@ pytest -q
 pytest -q -m "not live"  # deterministic tests; browser fixtures use local responses
 python -m build
 uv lock --check
-uvx --from pyright pyright --project pyrightconfig.json --pythonpath .venv\Scripts\python.exe
+uvx --from pyright==1.1.411 pyright --project pyrightconfig.json --pythonpath .venv\Scripts\python.exe
+uvx --from ruff==0.16.6 ruff check --select E4,E7,E9,F,I src tests scripts
 ```
 
 - `pytest -q` runs the full suite.
@@ -27,8 +28,10 @@ uvx --from pyright pyright --project pyrightconfig.json --pythonpath .venv\Scrip
   responses and local fixtures, no Google dependency).
 - `python -m build` verifies the wheel/sdist builds.
 - `uv lock --check` verifies that `uv.lock` matches `pyproject.toml`.
-- `uvx --from pyright ... --pythonpath ...` checks the product code without
+- `uvx --from pyright==1.1.411 ... --pythonpath ...` checks the product code without
   adding a runtime dependency to the Windows package or rewriting the venv.
+- `uvx --from ruff==0.16.6 ...` checks imports and the standard Python error
+  classes used by the product, tests, and installer.
 
 The end-to-end tests exercise the real stdio MCP handshake, `tools/list`,
 Google search, public URL fetching, and shutdown cleanup. They require Chrome

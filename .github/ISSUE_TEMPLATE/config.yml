@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability report
+    url: https://github.com/kotao-boop/chrome-web-mcp-windows/security/policy
+    about: Do not disclose credentials or full exploit details in a public issue. Follow SECURITY.md.
+  - name: Windows setup guide
+    url: https://github.com/kotao-boop/chrome-web-mcp-windows/blob/main/docs/windows.md
+    about: Check the Windows setup guide before opening a support issue.

@@ -3,7 +3,8 @@
 `chrome-web-mcp` is a Windows-first, browser-backed MCP server. It accepts
 public HTTP(S) URLs and starts a separate Chrome process for each server
 process. It is not intended to bypass authentication, CAPTCHAs, paywalls, or
-site access controls.
+site access controls. This policy applies to the independent Windows edition;
+the upstream project is not the support channel for this repository.
 
 ## Reporting a vulnerability
 
@@ -13,9 +14,10 @@ step-by-step reproduction instructions in a public issue.
 The preferred channel is GitHub's private security advisory flow: open the
 repository's **Security** tab and choose **Report a vulnerability**, if that
 feature is enabled for the repository. If private reporting is unavailable,
-open a public issue with only a short, non-sensitive description and ask for a
-private contact channel. Remove real tokens, cookies, account data, and
-personal information from all reports.
+open a public issue with only a short, non-sensitive description and ask the
+repository maintainer for a private contact channel. Remove real tokens,
+cookies, account data, and personal information from all reports. Do not open
+Windows-edition reports in the upstream repository.
 
 ## Scope
 

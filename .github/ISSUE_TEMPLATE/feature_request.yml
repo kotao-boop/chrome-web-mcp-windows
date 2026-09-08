@@ -1,0 +1,25 @@
+name: Feature request
+description: Suggest an improvement for the independent Windows edition.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the Windows use case. Avoid requests that require bypassing authentication, CAPTCHA, or site access controls.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: What would become easier or safer?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "chrome-web": {
-      "command": "C:\\Users\\YOU\\chrome-web-mcp\\.venv\\Scripts\\chrome-web-mcp.exe",
+      "command": "C:\\Users\\YOU\\chrome-web-mcp-windows\\.venv\\Scripts\\chrome-web-mcp.exe",
       "env": {
         "CW_DISPLAY_MODE": "hidden"
       }

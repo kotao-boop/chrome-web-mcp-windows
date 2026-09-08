@@ -26,7 +26,7 @@ startup. This is still not a way to view a CAPTCHA or permission dialog.
 ```bat
 python -m venv .venv
 .venv\Scripts\activate
-python -m pip install -e ".[test]"
+python -m pip install -e .
 ```
 
 If `chrome-web-mcp` cannot find Chrome, either install Google Chrome or run:
@@ -66,7 +66,7 @@ In Cursor Settings -> MCP, or in `%USERPROFILE%\.cursor\mcp.json`:
 {
   "mcpServers": {
     "chrome-web": {
-      "command": "C:\\Users\\YOU\\chrome-web-mcp\\.venv\\Scripts\\chrome-web-mcp.exe"
+      "command": "C:\\Users\\YOU\\chrome-web-mcp-windows\\.venv\\Scripts\\chrome-web-mcp.exe"
     }
   }
 }
@@ -81,7 +81,7 @@ Optional environment in the same entry:
 {
   "mcpServers": {
     "chrome-web": {
-      "command": "C:\\Users\\YOU\\chrome-web-mcp\\.venv\\Scripts\\chrome-web-mcp.exe",
+      "command": "C:\\Users\\YOU\\chrome-web-mcp-windows\\.venv\\Scripts\\chrome-web-mcp.exe",
       "env": {
         "CW_DISPLAY_MODE": "hidden"
       }
@@ -99,8 +99,8 @@ the example checkout path, and restart Codex:
 
 ```toml
 [mcp_servers.chrome-web]
-command = 'C:\Users\YOU\chrome-web-mcp\.venv\Scripts\chrome-web-mcp.exe'
-cwd = 'C:\Users\YOU\chrome-web-mcp'
+command = 'C:\Users\YOU\chrome-web-mcp-windows\.venv\Scripts\chrome-web-mcp.exe'
+cwd = 'C:\Users\YOU\chrome-web-mcp-windows'
 startup_timeout_sec = 30
 tool_timeout_sec = 120
 enabled = true
@@ -120,8 +120,8 @@ clients:
 
 | Client | Configuration file or screen | Example |
 | --- | --- | --- |
-| Cursor | `%USERPROFILE%\.cursor\mcp.json` or Cursor Settings -> MCP | [`mcp-config.uvx.json`](../examples/mcp-config.uvx.json) |
-| Claude Desktop | `%APPDATA%\Claude\claude_desktop_config.json` | [`mcp-config.uvx.json`](../examples/mcp-config.uvx.json) |
+| Cursor | `%USERPROFILE%\.cursor\mcp.json` or Cursor Settings -> MCP | [`mcp-config.windows.json`](../examples/mcp-config.windows.json) |
+| Claude Desktop | `%APPDATA%\Claude\claude_desktop_config.json` | [`mcp-config.windows.json`](../examples/mcp-config.windows.json) |
 | VS Code / GitHub Copilot | `.vscode\mcp.json` or `MCP: Open User Configuration` | [`mcp-config.vscode.json`](../examples/mcp-config.vscode.json) |
 | Antigravity CLI | `%USERPROFILE%\.gemini\config\mcp_config.json` or workspace `.agents\mcp_config.json` | [`mcp-config.antigravity.json`](../examples/mcp-config.antigravity.json) |
 | Windsurf / Cascade | `%USERPROFILE%\.codeium\windsurf\mcp_config.json` | [`mcp-config.windsurf.json`](../examples/mcp-config.windsurf.json) |

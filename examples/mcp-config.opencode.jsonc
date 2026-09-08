@@ -4,7 +4,7 @@
     "servers": {
       "chrome-web": {
         "type": "local",
-        "command": ["uvx", "--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
+        "command": ["C:\\Users\\YOU\\chrome-web-mcp-windows\\.venv\\Scripts\\chrome-web-mcp.exe"]
       }
     }
   }
