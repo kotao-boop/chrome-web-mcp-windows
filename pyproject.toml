@@ -19,7 +19,7 @@ classifiers = [
   "Topic :: Internet :: WWW/HTTP",
 ]
 dependencies = [
-  "mcp==1.28.0",
+  "mcp==1.28.1",
   "httpx==0.28.1",
   "websockets==16.0",
   "trafilatura>=2.2.0",
