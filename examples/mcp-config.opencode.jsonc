@@ -1,0 +1,11 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "chrome-web": {
+        "type": "local",
+        "command": ["uvx", "--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
+      }
+    }
+  }
+}

@@ -9,26 +9,38 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ['3.10', '3.13']
+        python-version: ['3.10', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install browser dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y xvfb x11-utils
-          google-chrome --version
       - name: Install package and test dependencies
-        run: python -m pip install -e '.[test]' build
+        run: python -m pip install -e ".[test]"
+      - name: Check dependency lock file
+        run: |
+          python -m pip install uv
+          uv lock --check
+      - name: Type-check product code
+        shell: pwsh
+        run: |
+          $pythonPath = python -c "import sys; print(sys.executable)"
+          uvx --from pyright pyright --project pyrightconfig.json --pythonpath $pythonPath
+      - name: Ensure Chrome is available
+        shell: pwsh
+        run: |
+          python -c "from chrome_web_mcp.platform_runtime import discover_chrome, chrome_version; b=discover_chrome(); print(b); print(chrome_version(b))"
+          if ($LASTEXITCODE -ne 0) {
+            python scripts/install-chrome-for-testing.py
+            python -c "from chrome_web_mcp.platform_runtime import discover_chrome, chrome_version; b=discover_chrome(); print(b); print(chrome_version(b))"
+          }
       - name: Run deterministic tests including real-browser security fixtures
         env:
-          CW_DISPLAY_MODE: xvfb
-          TMPDIR: ${{ runner.temp }}
-        run: python -m pytest -q -m 'not live'
+          CW_DISPLAY_MODE: headless
+        run: python -m pytest -q -m "not live"
       - name: Build wheel and source distribution
         run: python -m build

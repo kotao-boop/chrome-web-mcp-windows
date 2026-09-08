@@ -1,7 +1,6 @@
 """Config-file loading: defaults, overrides, and per-key fallback on bad values."""
 
 import json
-import os
 
 from chrome_web_mcp import server
 
@@ -69,8 +68,8 @@ def test_broken_json_falls_back_to_defaults(monkeypatch, tmp_path):
 
 def test_default_path_used_when_cw_config_unset(monkeypatch, tmp_path):
     monkeypatch.delenv("CW_CONFIG", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    conf_dir = tmp_path / ".config" / "chrome-web-mcp"
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    conf_dir = tmp_path / "chrome-web-mcp"
     conf_dir.mkdir(parents=True)
     (conf_dir / "config.json").write_text(
         json.dumps({"show_browser": True}), encoding="utf-8")
@@ -79,9 +78,6 @@ def test_default_path_used_when_cw_config_unset(monkeypatch, tmp_path):
 
 def test_env_display_mode_wins_over_config(monkeypatch, tmp_path):
     # BrowserRuntime uses CW_DISPLAY_MODE when set, else the config value.
-    monkeypatch.setenv("CW_DISPLAY_MODE", "xvfb")
+    monkeypatch.setenv("CW_DISPLAY_MODE", "headless")
     monkeypatch.setenv("CW_CONFIG", write_config(tmp_path, {"show_browser": True}))
-    resolved = os.environ.get("CW_DISPLAY_MODE", "").strip().lower() or (
-        "xephyr" if server._load_config()["show_browser"] else "xvfb"
-    )
-    assert resolved == "xvfb"
+    assert server.BrowserRuntime().display_mode == "headless"

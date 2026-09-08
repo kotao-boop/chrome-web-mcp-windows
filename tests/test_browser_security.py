@@ -2,7 +2,6 @@
 import asyncio
 import base64
 import json
-import shutil
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -15,15 +14,13 @@ PUBLIC_FIXTURE = "https://93.184.215.14/fixture"
 
 @pytest.fixture
 def browser_fixture(tmp_path, monkeypatch):
-    if not shutil.which("Xvfb") or not shutil.which("xdpyinfo"):
-        pytest.skip("Xvfb and xdpyinfo required")
     try:
         server.BrowserRuntime._chrome_executable()
     except RuntimeError:
         pytest.skip("Chrome required")
     profile = tmp_path / "profile"
     monkeypatch.setenv("CW_PROFILE_DIR", str(profile))
-    monkeypatch.setenv("CW_DISPLAY_MODE", "xvfb")
+    monkeypatch.setenv("CW_DISPLAY_MODE", "headless")
     monkeypatch.setattr(server, "PROFILE_DIR", profile)
     monkeypatch.setattr(server, "LOCK_PATH", profile / ".instance.lock")
     monkeypatch.setattr(server, "DEVTOOLS_FILE", profile / "DevToolsActivePort")

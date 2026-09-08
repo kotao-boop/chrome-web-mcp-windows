@@ -3,32 +3,37 @@
 `config.json` must contain valid JSON. JSON does not support comments, so the
 explanations for each setting are in this file instead of inside the JSON.
 
-Copy both files to the user's configuration directory:
+On Windows, copy both files to the user's configuration directory:
 
-```bash
-mkdir -p ~/.config/chrome-web-mcp
-cp examples/config.json examples/config.md ~/.config/chrome-web-mcp/
+```powershell
+New-Item -ItemType Directory -Force "$env:APPDATA\chrome-web-mcp"
+Copy-Item examples\config.json, examples\config.md "$env:APPDATA\chrome-web-mcp\"
 ```
 
-The server automatically reads `~/.config/chrome-web-mcp/config.json`. Use the
-`CW_CONFIG` environment variable when the file is somewhere else.
+The Windows edition automatically reads `%APPDATA%\chrome-web-mcp\config.json`.
+Use the `CW_CONFIG` environment variable when the file is somewhere else.
 
 The file is per user. You do not need to change the server code for a
 different language or region.
 
-## Headless environments
+## Windows desktop and headless environments
 
-If you run on a headless server, CI runner, SSH session without X forwarding,
-or any machine without a desktop display, set:
+On a normal Windows desktop, set this when you want a real Chrome window kept
+out of sight:
 
 ```json
 { "show_browser": false }
 ```
 
-This uses hidden Xvfb instead of Xephyr. The built-in default is `true` for
-desktop use, so explicitly set `false` on headless machines and restart the
-MCP client after changing the file. Docker already sets hidden Xvfb inside the
-container by default.
+On Windows this uses an off-screen native Chrome window (not `--headless`).
+New Chrome windows are hidden continuously, but a hidden CAPTCHA or permission
+dialog is not visible to the user. The built-in default is `true` for desktop
+use.
+
+For a Windows service, CI runner, scheduled task, SSH session, or any machine
+without an interactive desktop, set `CW_DISPLAY_MODE=headless` in the MCP
+client's environment. This environment variable takes priority over the JSON
+setting and selects Chrome's `--headless=new` mode.
 
 ## Settings
 
@@ -36,21 +41,13 @@ container by default.
 
 Controls whether the browser window is visible:
 
-- `true`: show a window titled `chrome-web-mcp` on the desktop. Use this when
-  you need to see or manually solve a CAPTCHA.
-- `false`: run Chrome on a hidden virtual display.
+- `true`: visible browser. Windows uses a normal Chrome window.
+- `false`: hidden browser. Windows uses an off-screen native window and a small
+  watcher that hides windows created later by Chrome.
 
-When `show_browser` is `true`, the server uses Xephyr. It requires a desktop
-`DISPLAY` and the `Xephyr` program. It is not available on a headless machine
-without a desktop display. The built-in default is `true`, so use `false` on a
-headless machine or when you do not want a window.
-
-For the Docker version, `show_browser` is not read from the host config file.
-The Docker image runs hidden Xvfb by default. If it reports
-`captcha_required: true`, the challenge is inside the Docker container, not in
-the local browser. Run that Docker MCP with `CW_DISPLAY_MODE=xephyr`, the host
-`DISPLAY`, the X11 socket, and the matching Xauthority file to display and
-solve the same container browser. See the Docker section in `README.md`.
+No separate display server is required. The built-in default is
+`true`, so use `false` on an interactive desktop when you do not want a window;
+use `CW_DISPLAY_MODE=headless` when there is no desktop session.
 
 ### `hl` and `gl`
 

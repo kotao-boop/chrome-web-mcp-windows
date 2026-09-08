@@ -6,3 +6,5 @@ build/
 dist/
 .e2e-sandbox/
 chrome-profile/
+.local-chrome/
+.audit-backup-*/

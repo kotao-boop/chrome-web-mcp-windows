@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "chrome-web": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
+    }
+  }
+}

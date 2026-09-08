@@ -1,9 +1,0 @@
-.venv/
-.git/
-dist/
-build/
-*.egg-info/
-__pycache__/
-.pytest_cache/
-.e2e-sandbox/
-chrome-profile/

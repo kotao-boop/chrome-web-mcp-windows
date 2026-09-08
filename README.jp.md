@@ -1,130 +1,420 @@
 # chrome-web-mcp
 
+[![Verify](https://github.com/kotao-boop/chrome-web-mcp-windows/actions/workflows/verify.yml/badge.svg)](https://github.com/kotao-boop/chrome-web-mcp-windows/actions/workflows/verify.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 [English README](README.md)
 
-> **対応OS: Linuxのみ。** WindowsとmacOSはサポート対象外です。Dockerを
-> 使用する場合も、ホストOSの対応条件は変わりません。
+> 本リポジトリは、[kuraneko1/chrome-web-mcp](https://github.com/kuraneko1/chrome-web-mcp)をもとに
+> Windows向けへ再設計した独立派生版です。元プロジェクトの公式Windows版ではなく、元プロジェクトの
+> 管理者による保証や承認を示すものではありません。
+
+Google Chromeを操作し、AIツールにGoogle検索結果やWebページの本文を取得させる
+MCP（Model Context Protocol。AIと外部ツールを接続するための共通規格）サーバーです。
+Windows 10およびWindows 11で動作します。
+
+主に次の3つのツールを提供します。
+
+- `google_search`: Google検索を実行し、タイトル、URL、概要などの構造化データを返します。
+- `fetch_url`: 公開Webページを取得し、余計な装飾を除いた読みやすい本文を返します。
+- `health_check`: ブラウザの稼働状態、検索の待機時間、CAPTCHAの状態などを確認します。
+
+---
+
+## 目次
+
+1. [重要な前提と注意事項](#重要な前提と注意事項)
+2. [主な特徴](#主な特徴)
+3. [クイックスタート（導入手順）](#クイックスタート導入手順)
+4. [提供ツールの詳細と仕様](#提供ツールの詳細と仕様)
+5. [設定とカスタマイズ](#設定とカスタマイズ)
+6. [CAPTCHA（画像認証）への対処手順](#captcha画像認証への対処手順)
+7. [安全性とセキュリティ設計](#安全性とセキュリティ設計)
+8. [動作環境と容量の目安](#動作環境と容量の目安)
+9. [更新手順](#更新手順)
+10. [開発とテスト](#開発とテスト)
+11. [由来と謝辞](#由来と謝辞)
+12. [ライセンス](#ライセンス)
+
+---
+
+## 重要な前提と注意事項
+
+> **Windows専用（Windows 10 / Windows 11）**
+> このソフトウェアはWindows環境向けに設計・検証されています。対応OSはWindowsのみです。
+> 追加の表示サーバーを導入する必要はなく、Windowsの標準機能でそのまま動作します。
 
 > [!CAUTION]
-> 1つのMCPサーバープロセスにつき、ブラウザは1つだけ使用してください。
-> 検索は連続して大量に実行せず、基本的に順番に実行します。
+> **検索の頻度とブラウザの起動について**
+> 1つのMCPサーバープロセスにつき、起動するブラウザは1つです。短時間に大量の検索を
+> 連続して実行せず、基本的に順番に処理します。
 >
-> - 通常の利用ではレート制限にかかりません。1分間に15回以上の検索を
->   開始すると`pace_warning`が返ります。
-> - `pace_warning`はブロックではありませんが、短時間に大量検索を続けると
->   GoogleからCAPTCHAを要求されることがあります。CAPTCHAが出た場合は、
->   数分待ってから再試行してください。`show_browser: true`（Xephyr）なら
->   `chrome-web-mcp`の窓でCAPTCHAを解いてから同じ検索を再試行できます。
-> - 別々のMCPプロセスは、それぞれ別のブラウザを起動します。複数のCLIや
->   MCPクライアントから同時に大量検索しないでください。
+> - 通常の利用範囲ではレート制限（短時間に大量のアクセスを行わないための制限）に
+>   かかりません。1分間に15回以上の検索を開始すると、`pace_warning`が返ります。
+> - 警告が出ても検索自体は継続されます。ただし、過度な連続アクセスを行うとGoogleから
+>   CAPTCHA（「私はロボットではありません」のような画像認証）を求められる場合が
+>   あります。認証画面が出たら数分待って再試行するか、ブラウザを表示する設定にして
+>   手動で解除してください。
+> - 独立した複数のMCPサーバープロセスを起動すると、それぞれ別のブラウザが起動します。
+>   複数のAIツールから同時に過度な検索を実行しないでください。
 
-JavaScriptを実行できるChromeを使って、以下のMCPツールを提供するstdio
-サーバーです。
+---
 
-- `google_search`: Google検索を実行し、構造化された結果を返します。
-- `fetch_url`: 公開HTTP(S)ページを取得し、読みやすいテキストやMarkdownを返します。
-- `health_check`: ブラウザ、表示モード、検索待ち時間、CAPTCHA状態を確認します。
+## 主な特徴
 
-## 特徴
+- **本物のChromeを利用**: JavaScriptで表示内容が変わるWebページでも、検索と本文取得を
+  実際のChromeで行います。
+- **読みやすいMarkdown整形**: `trafilatura`と`html2text`を使い、ヘッダー、フッター、
+  広告などの不要な部分を省いて本文を整形します。
+- **表示言語と検索地域を指定**: `hl: "ja"`、`gl: "jp"`など、目的に合わせた検索結果を
+  指定できます。
+- **画面表示を切り替え可能**: 通常のウィンドウ表示、画面外へ移動して非表示にする方式、
+  画面を持たない環境向けのヘッドレスモードに対応しています。
+- **アクセス安全機能**: 公開アドレスへの接続だけを許可し、`localhost`やプライベートIP
+  アドレスへの通信を遮断します。
+- **確実な終了処理**: WindowsのJob Objectを使い、MCPクライアント終了時にChromeなどの
+  関連プロセスも自動的に終了させます。
 
-- 実際のChrome/Chromiumを使ったJavaScript対応のGoogle検索とページ取得
-- Xephyr（窓あり）またはXvfb（窓なし）による独立した仮想ディスプレイ
-- `trafilatura`と`html2text`による読みやすいMarkdown整形
-- `hl`（Googleの表示言語）と`gl`（検索地域）の指定
-- 公開アドレスだけに接続する検証プロキシ。localhostやプライベートIPを拒否
-- Google検索の開始間隔をSQLiteでプロセス間共有
-- Chrome、表示サーバー、プロキシの終了処理と孤児プロセスの回収
-- Linux専用
+---
 
-## 必要環境
+## クイックスタート（導入手順）
 
-- Python 3.10以上
-- Google Chrome、Google Chrome for Testing、またはChromium
-- 窓を表示する場合: Linuxの`Xephyr`とデスクトップの`DISPLAY`
-- 窓を表示しない場合: Linuxの`Xvfb`
-- CAPTCHAを対話的に解除する場合（任意）: `xpra`
+### 方式A: `uvx`を利用する場合（推奨）
 
-## ヘッドレス環境
+`uv`がインストールされている場合は、手動で仮想環境を作らずにMCPクライアントの
+設定から公開パッケージを取得して起動できます。安定したバージョンを使うため、ここでは
+`0.2.0`を指定しています。公開するバージョンに合わせて番号を変更してください。
 
-デスクトップのないサーバー、CI、X転送なしのSSHセッションでは、設定ファイルに
-必ず次を指定してください。
+#### Cursorでの設定例
 
-```json
-{
-  "show_browser": false
-}
-```
-
-設定ファイルの場所は通常`~/.config/chrome-web-mcp/config.json`です。
-`CW_CONFIG`で別の場所を指定できます。変更後はMCPクライアントを再起動して
-ください。
-
-`show_browser: false`ではChromeを隠しXvfb上で起動します。内蔵デフォルトは
-デスクトップ利用向けの`true`なので、ヘッドレス環境ではこの設定を省略しないで
-ください。Docker版はコンテナ内でXvfbを使用するため、通常はホストのDISPLAYを
-設定する必要はありません。
-
-## Linuxでのインストール
-
-Debian/Ubuntuでは、まずシステム依存パッケージをインストールします。
-
-```bash
-sudo apt update
-sudo apt install -y chromium xvfb xserver-xephyr x11-utils python3-venv
-```
-
-ソースからインストールします。
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python3 -m pip install -e '.'
-```
-
-### opencodeの設定
-
-`~/.config/opencode/opencode.json`の`mcp`に追加します。
+`%USERPROFILE%\.cursor\mcp.json`、またはCursorの「設定」→「MCP」に追加します。コピーして
+使えるファイルは[`examples/mcp-config.uvx.json`](examples/mcp-config.uvx.json)です。
 
 ```json
 {
-  "mcp": {
+  "mcpServers": {
     "chrome-web": {
-      "type": "local",
-      "command": [
-        "/absolute/path/to/chrome-web-mcp/.venv/bin/chrome-web-mcp"
-      ],
-      "enabled": true,
-      "timeout": 120000
+      "command": "uvx",
+      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
     }
   }
 }
 ```
 
-`/absolute/path/to/chrome-web-mcp`は実際のチェックアウト先に置き換えて
-ください。設定変更後はopencodeを再起動します。
+#### Claude Desktopでの設定例
 
-ローカル版とDocker版を比較したい場合は、別名で追加できます。
+`%APPDATA%\Claude\claude_desktop_config.json`に追加します。コピーして使えるファイルは
+[`examples/mcp-config.uvx.json`](examples/mcp-config.uvx.json)です。
 
 ```json
-"chrome-web-docker": {
-  "type": "local",
-  "command": ["docker", "run", "--rm", "-i", "chrome-web-mcp:latest"],
-  "enabled": true,
-  "timeout": 120000
+{
+  "mcpServers": {
+    "chrome-web": {
+      "command": "uvx",
+      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
+    }
+  }
 }
 ```
 
-## 設定ファイル
+#### VS Code / GitHub Copilotでの設定例
 
-設定ファイルは次の2つをコピーして使います。
+プロジェクト単位で設定する場合は、プロジェクトフォルダー内に`.vscode/mcp.json`を
+作成します。ユーザー共通で設定する場合は、コマンドパレットから「MCP: Open User
+Configuration」を実行します。次の内容を追加、または既存の設定に統合してください。
+コピーして使えるファイルは[`examples/mcp-config.vscode.json`](examples/mcp-config.vscode.json)です。
 
-```bash
-mkdir -p ~/.config/chrome-web-mcp
-cp examples/config.json examples/config.md ~/.config/chrome-web-mcp/
+```json
+{
+  "servers": {
+    "chrome-web": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
+    }
+  }
+}
 ```
 
-JSONはコメントをサポートしていないため、説明は`config.md`にあります。
-主な設定は次のとおりです。
+#### Google Antigravity CLIでの設定例
+
+現在のGoogle CLIはAntigravity CLIです。Gemini CLIから移行する場合は、Google公式の
+[移行ガイド](https://antigravity.google/docs/cli/gcli-migration)を参照してください。
+Antigravity CLIでは、全体設定の`%USERPROFILE%\.gemini\config\mcp_config.json`に、次の設定を
+追加または統合します。プロジェクト単位で設定する場合は、プロジェクトフォルダー内の
+`.agents\mcp_config.json`に同じ内容を保存します。Antigravity IDEでも同じ`mcp_config.json`
+形式を使います。詳しくはGoogle公式の
+[Antigravity MCPガイド](https://antigravity.google/docs/cli/mcp/)を参照してください。コピーして
+使えるファイルは
+[`examples/mcp-config.antigravity.json`](examples/mcp-config.antigravity.json)です。
+
+```json
+{
+  "mcpServers": {
+    "chrome-web": {
+      "command": "uvx",
+      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
+    }
+  }
+}
+```
+
+#### Windsurf（Cascade）での設定例
+
+`%USERPROFILE%\.codeium\windsurf\mcp_config.json`に追加または統合します。
+Windsurfの「Settings」→「Cascade」→「MCP Servers」→「View Raw Config」から設定ファイルを
+開くこともできます。コピーして使えるファイルは
+[`examples/mcp-config.windsurf.json`](examples/mcp-config.windsurf.json)です。
+
+```json
+{
+  "mcpServers": {
+    "chrome-web": {
+      "command": "uvx",
+      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
+    }
+  }
+}
+```
+
+#### OpenCodeでの設定例
+
+プロジェクトの`opencode.jsonc`に、次のサーバー設定を追加します。すでに設定がある場合は、
+内容を消さずに統合してください。コピーして使えるファイルは
+[`examples/mcp-config.opencode.jsonc`](examples/mcp-config.opencode.jsonc)です。
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "chrome-web": {
+        "type": "local",
+        "command": ["uvx", "--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
+      }
+    }
+  }
+}
+```
+
+上の例は、公開パッケージを使う設定です。`uvx`を使うため、`uv`にPATHが通っている必要が
+あります。ローカルのソースコードを使う場合は、`uvx`の部分を仮想環境の実行ファイルに
+置き換えてください。
+
+- Cursor、Claude Desktop、Antigravity CLI、Windsurfなど`mcpServers`を使うクライアント:
+  `command`を`C:\\Users\\YOU\\chrome-web-mcp\\.venv\\Scripts\\chrome-web-mcp.exe`に
+  変更し、`args`を削除します。
+- VS Code: 同じ実行ファイルを`command`に指定し、`type`は`"stdio"`のまま、`args`は`[]`に
+  します。
+- OpenCode: `command`を、例えば
+  `["C:\\Users\\YOU\\chrome-web-mcp\\.venv\\Scripts\\chrome-web-mcp.exe"]`のような
+  1要素の配列に変更します。
+
+---
+
+### 方式B: ソースコードからローカルでセットアップする場合
+
+GitHubからソースコードを取得して使う場合は、次の手順で専用環境を構築します。
+
+1. コマンドプロンプトまたはPowerShellで、仮想環境を作成して依存関係をインストールします。
+
+```bat
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install -e ".[test]"
+```
+
+2. PCにGoogle Chromeがインストールされていない場合は、Chrome for Testingを配置します。
+   すでにGoogle Chromeがある場合、この手順は不要です。
+
+```bat
+python scripts\install-chrome-for-testing.py
+```
+
+3. MCPクライアントの設定ファイルに、作成した実行ファイルの絶対パスを記述します。
+
+```json
+{
+  "mcpServers": {
+    "chrome-web": {
+      "command": "C:\\Users\\YOU\\chrome-web-mcp\\.venv\\Scripts\\chrome-web-mcp.exe"
+    }
+  }
+}
+```
+
+#### Codexでの設定例
+
+Codex DesktopまたはCodex CLIでは、`%USERPROFILE%\.codex\config.toml`に次の設定を
+追加します。`YOU`の部分は自分のユーザー名に置き換えてください。
+
+```toml
+[mcp_servers.chrome-web]
+command = 'C:\Users\YOU\chrome-web-mcp\.venv\Scripts\chrome-web-mcp.exe'
+args = []
+cwd = 'C:\Users\YOU\chrome-web-mcp'
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+enabled = true
+
+[mcp_servers.chrome-web.env]
+# 対話的なデスクトップがない場合は "headless" に変更します。
+CW_DISPLAY_MODE = "hidden"
+```
+
+設定を保存したら、MCPクライアントを再起動してください。
+
+---
+
+## 提供ツールの詳細と仕様
+
+### 1. `google_search`（Google検索）
+
+Google検索を行い、整理された結果を返します。
+
+#### 入力パラメータ
+
+```json
+{
+  "query": "検索キーワード",
+  "limit": 5,
+  "hl": "ja",
+  "gl": "jp"
+}
+```
+
+- `query`（必須）: 検索する文字列。最大512文字です。
+- `limit`（省略可能）: 取得件数。1〜20件で、初期値は5件です。
+- `hl`（省略可能）: Googleの表示言語。2〜8文字のコードを指定します。
+- `gl`（省略可能）: 検索地域。2〜8文字のコードを指定します。
+
+#### 成功時のレスポンス例
+
+```json
+{
+  "success": true,
+  "data": {
+    "web": [
+      {
+        "title": "ページのタイトル",
+        "url": "https://example.com/page",
+        "description": "検索結果の説明文",
+        "position": 1
+      }
+    ],
+    "waited_ms": 1240,
+    "pace_warning": null
+  }
+}
+```
+
+検索結果の一覧は`data.web`に入ります。`waited_ms`は検索開始までの待機時間（ミリ秒）です。
+`pace_warning`は通常`null`で、短時間に検索が集中した場合は警告文が入ります。
+
+---
+
+### 2. `fetch_url`（Webページ取得）
+
+公開されているWebページの内容を読み取り、指定された形式で本文を返します。
+
+#### 入力パラメータ
+
+```json
+{
+  "url": "https://example.com",
+  "char_limit": 15000,
+  "format": "markdown"
+}
+```
+
+- `url`（必須）: 取得先のURL。`http://`または`https://`のみ、最大2048文字です。
+- `char_limit`（省略可能）: 返す本文の最大文字数。100〜200000文字で、初期値は15000です。
+- `format`（省略可能）: 出力形式。初期値は`"markdown"`です。
+  - `"markdown"`: 本文以外の定型部分を除いた読みやすいMarkdownを返します。本文は
+    `data.markdown`に入り、ページ内リンクの`data.links`（最大200件）も返します。
+  - `"text"`: ページの全文をプレーンテキストで返します。本文は`data.text`に入り、
+    `links`は返しません。Markdown抽出で欠落がある場合に使用します。
+  - `"links"`: プレーンテキスト本文（`data.text`）と、ページ内リンクの`data.links`
+    （最大200件）を返します。
+
+#### 成功時のレスポンス例（`format: "markdown"`）
+
+```json
+{
+  "success": true,
+  "data": {
+    "requested_url": "https://example.com",
+    "final_url": "https://example.com/page",
+    "redirected": true,
+    "title": "ページタイトル",
+    "total_chars": 8500,
+    "truncated": false,
+    "format": "markdown",
+    "formatted": true,
+    "extraction": "trafilatura",
+    "markdown": "# 記事見出し\n\n本文テキスト...",
+    "links": [
+      {"text": "関連ページ", "url": "https://example.com/subpage"}
+    ]
+  }
+}
+```
+
+URLは公開アドレスだけを取得できます。`localhost`、プライベートIP、クラウドのメタデータ用
+ホスト、認証情報を含むURLなどは拒否されます。レスポンスには最終URL、リダイレクトの有無、
+総文字数、切り詰めの有無、本文の抽出方法も含まれます。
+
+---
+
+### 3. `health_check`（稼働状態確認）
+
+引数は不要です。引数を渡すとエラーになります。
+
+#### 成功時のレスポンス例
+
+```json
+{
+  "success": true,
+  "data": {
+    "platform": "Windows 10 (AMD64)",
+    "display_mode": "native",
+    "chrome_binary": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "chrome_version": "Google Chrome 150.0.0.0",
+    "chrome_detection_error": null,
+    "chrome_alive": true,
+    "windows_job_attached": true,
+    "gpu_device": null,
+    "gpu_renderer": null,
+    "gpu_backend": "UNKNOWN",
+    "rate_limiter_queue_wait_s": 0.0,
+    "rate_limit_min_delay_s": 1.0,
+    "rate_limit_max_delay_s": 2.5,
+    "recent_searches_60s": 2,
+    "pace_warning": null,
+    "last_captcha_at": null
+  }
+}
+```
+
+ブラウザの稼働状態、Chromeのバージョン、Job Objectへの接続状態、直近60秒間の検索回数
+などを確認できます。このツールを実行してもブラウザ自体は起動しません。
+
+---
+
+## 設定とカスタマイズ
+
+### 設定ファイルの作成
+
+設定ファイル（`config.json`）を配置すると、既定の動作を変更できます。PowerShellで次の
+コマンドを実行して雛形を作成します。
+
+```powershell
+New-Item -ItemType Directory -Force "$env:APPDATA\chrome-web-mcp"
+Copy-Item examples\config.json, examples\config.md "$env:APPDATA\chrome-web-mcp\"
+```
+
+配置先は`%APPDATA%\chrome-web-mcp\config.json`です。別の場所を使う場合は、`CW_CONFIG`
+環境変数にJSONファイルのパスを指定してください。
 
 ```json
 {
@@ -139,151 +429,51 @@ JSONはコメントをサポートしていないため、説明は`config.md`�
 }
 ```
 
-- `show_browser`: `true`で`chrome-web-mcp`の窓を表示、`false`で非表示
-- `hl`: Googleの表示言語。`ja`は日本語、`en`は英語
-- `gl`: Googleの検索地域。`jp`は日本、`us`は米国
-- `limit`: `google_search`の既定結果数（1から20）
-- `char_limit`: `fetch_url`の既定最大文字数（100から200000）
-- `format`: `markdown`、`text`、`links`のいずれか
-- `min_delay` / `max_delay`: Google検索開始間隔の秒数。範囲内でランダム化
+主な設定は次のとおりです。
 
-日本語の検索結果にしたい場合は次を指定します。
+- `show_browser`: `true`で通常のChromeウィンドウを表示し、`false`で画面外へ移動して
+  非表示にします。対話的なデスクトップがない場合は`CW_DISPLAY_MODE=headless`を使います。
+- `hl` / `gl`: Googleの表示言語と検索地域です。日本語・日本向けなら`ja` / `jp`を指定します。
+- `limit`: `google_search`の既定結果数。1〜20です。
+- `char_limit`: `fetch_url`の既定最大文字数。100〜200000です。
+- `format`: `fetch_url`の既定形式。`markdown`、`text`、`links`から選びます。
+- `min_delay` / `max_delay`: Google検索開始間隔の秒数です。範囲内でランダム化されます。
 
-```json
-{
-  "hl": "ja",
-  "gl": "jp"
-}
+### サーバーやバックグラウンドでの実行（ヘッドレスモード）
+
+タスクスケジューラ、CI、自動処理、リモート操作環境など、画面表示を行わない環境では、
+環境変数を使ってヘッドレスモードを明示します。
+
+```bat
+set CW_DISPLAY_MODE=headless
+chrome-web-mcp
 ```
 
-英語・米国向けにしたい場合は次です。
+`CW_DISPLAY_MODE`は`show_browser`より優先されます。`native`、`hidden`、`headless`の
+いずれかを指定できます。
 
-```json
-{
-  "hl": "en",
-  "gl": "us"
-}
-```
+### 主な環境変数
 
-`hl`と`gl`をツール呼び出しで省略すると、設定ファイルの値が使われます。
-ツール呼び出し側で明示した値がある場合は、その呼び出しだけ明示値が優先されます。
-設定ファイルを変更したらMCPクライアントを再起動してください。
+| 環境変数 | 役割 | 既定値 |
+| :--- | :--- | :--- |
+| `CW_CONFIG` | 設定ファイル（JSON）のパス | `%APPDATA%\chrome-web-mcp\config.json` |
+| `CW_DISPLAY_MODE` | 表示モード。`native`、`hidden`、`headless`。`show_browser`より優先 | 未指定 |
+| `CW_CHROME` | 使用するChrome実行ファイルのパス | 自動検出 |
+| `CW_PROFILE_DIR` | Chromeプロファイルの保存先 | `%TEMP%\chrome-web-v2-profile\{プロセスID}` |
+| `CW_LOCK_PATH` | プロファイルロックファイルのパス | プロファイル内の`.instance.lock` |
+| `CW_RATE_LIMIT_DB` | 検索間隔制御用SQLiteのパス | `%TEMP%\chrome-web-mcp\search-rate-limit.sqlite3` |
+| `CW_MIN_DELAY` / `CW_MAX_DELAY` | 検索開始間隔（秒） | `1.0` / `2.5` |
 
-## Docker
+設定ファイルの不明なキーや不正な値は、標準エラー出力へ警告を出して既定値が使われます。
+設定を変更したらMCPクライアントを再起動してください。
 
-DockerイメージにはPython依存関係、Chromium、Xvfb、Xephyrなどが含まれます。
+---
 
-```bash
-docker build -t chrome-web-mcp .
-```
+## CAPTCHA（画像認証）への対処手順
 
-通常のDocker版はコンテナ内のXvfbを使用するため、窓は表示されません。
-opencodeでは`chrome-web-docker`として登録できます。
+このサーバーは、Googleの画像認証やパスワード認証を自動的に突破する機能を備えていません。
 
-### Docker版でCAPTCHAが出た場合
-
-Docker版で`captcha_required: true`が返った場合、CAPTCHAはDockerコンテナ内の
-ブラウザに表示されています。ローカル版の窓を操作してもDocker版のCAPTCHAは
-解除できません。
-
-同じDocker版をXephyr表示で起動するには、ホストのDISPLAY、X11ソケット、
-Xauthorityをコンテナへ渡します。
-
-```bash
-docker run -i --rm \
-  -e DISPLAY=$DISPLAY \
-  -e CW_DISPLAY_MODE=xephyr \
-  -e XAUTHORITY=$XAUTHORITY \
-  -v /tmp/.X11-unix:/tmp/.X11-unix \
-  -v "$XAUTHORITY":"$XAUTHORITY":ro \
-  chrome-web-mcp
-```
-
-Linuxのデスクトップ環境とXephyrが必要です。Wayland/Mutterでは、
-`$XDG_RUNTIME_DIR`内の`.mutter-Xwaylandauth.*`が認証ファイルになる場合が
-あります。詳しい注意点は英語版READMEのDocker節にも記載しています。
-
-最も簡単なCAPTCHA対策は、デスクトップ環境では最初からローカル版の
-`show_browser: true`を使うことです。
-
-## 更新
-
-### ローカルチェックアウト
-
-```bash
-git -C /absolute/path/to/chrome-web-mcp fetch origin
-git -C /absolute/path/to/chrome-web-mcp reset --hard origin/main
-```
-
-履歴がforce-pushされることがあるため、`pull --ff-only`では更新できない場合が
-あります。ローカル変更がある場合は、先に内容を確認してから`git stash`などで
-退避してください。更新後はMCPクライアントを再起動します。
-
-`uv run --directory ... chrome-web-mcp`形式なら、次回起動時に依存関係も同期される
-ため、通常は別途再インストール不要です。専用venvを使っている場合は次を実行
-します。
-
-```bash
-uv pip install --python ~/.local/share/chrome-web-mcp/venv/bin/python \
-  -U -e /absolute/path/to/chrome-web-mcp
-```
-
-### Docker
-
-ソースを更新したらイメージを再ビルドします。Dockerfileの編集は通常不要です。
-
-```bash
-docker build -t chrome-web-mcp /absolute/path/to/chrome-web-mcp
-```
-
-## ツール
-
-### `google_search`
-
-```json
-{
-  "query": "検索語",
-  "limit": 5,
-  "hl": "ja",
-  "gl": "jp"
-}
-```
-
-`query`は必須で最大512文字、`limit`は1から20です。結果にはタイトル、URL、
-説明、順位のほか、検索待ち時間`waited_ms`と`pace_warning`が含まれます。
-検索結果を詳しく読む場合は、次に`fetch_url`を使います。
-
-### `fetch_url`
-
-```json
-{
-  "url": "https://example.com",
-  "char_limit": 15000,
-  "format": "markdown"
-}
-```
-
-公開HTTP(S) URLだけを取得できます。localhost、プライベートIP、メタデータ用
-ホスト、認証情報を含むURLは拒否されます。
-
-- `markdown`: boilerplateを除いた読みやすいMarkdown。通常はこちら
-- `text`: ページの全文。Markdown抽出で欠落がある場合に使用
-- `links`: 本文に加えて、次に辿れるリンクも返す
-
-`char_limit`は100から200000、URLは最大2048文字です。レスポンスには最終URL、
-リダイレクト有無、総文字数、切り詰め有無、抽出方法が含まれます。
-
-### `health_check`
-
-引数はありません。表示モード、Chrome/Xvfb/Xephyrの稼働状態、検索キューの待ち
-時間、直近の検索数、CAPTCHA時刻を返します。health_check自体はブラウザを起動
-しません。
-
-## CAPTCHAについて
-
-このサーバーは認証やCAPTCHAを自動的に突破するものではありません。
-
-GoogleがCAPTCHAを表示すると、ツールは次のような結果を返します。
+短時間に検索を繰り返してGoogleから認証を求められた場合、ツールは次のようなエラーを返します。
 
 ```json
 {
@@ -293,34 +483,105 @@ GoogleがCAPTCHAを表示すると、ツールは次のような結果を返し�
 }
 ```
 
-`show_browser: true`なら、デスクトップ上の`chrome-web-mcp`窓でCAPTCHAを解き、
-同じ検索を再試行します。`false`なら数分待ってから再試行してください。
+- **ブラウザを表示している場合（`show_browser: true`）**: 開いているChromeウィンドウを
+  操作し、自分で画像認証を完了してから、同じ検索をもう一度実行してください。
+- **ブラウザを非表示にしている場合（`show_browser: false`）**: 自動的には解除できないため、
+  数分待って再試行するか、`show_browser: true`に変更して再起動してください。
 
-## セキュリティと範囲
+---
 
-- 任意のページコンテキストJavaScriptを実行するツールは提供しません
-- ブラウザのHTTP(S)/WebSocket接続は公開アドレスに限定します
-- URL内の認証情報や明らかな秘密情報パターンを拒否します
-- サーバーごとにChromeと仮想ディスプレイを所有し、終了時に回収します
-- ホストのWaylandセッションではなく、明示したX11仮想ディスプレイ上でChromeを動かします
-- これは一般的なリモートブラウザ操作APIではありません
+## 安全性とセキュリティ設計
 
-## 謝辞
+- **ローカル通信の遮断**: `localhost`やプライベートIPアドレスへのアクセスを遮断し、
+  外部の公開Webページだけを取得します。
+- **認証情報を含むURLの拒否**: パスワードなどの秘密情報が含まれるURLへのアクセスを拒否します。
+- **プロセスの自動終了**: WindowsのJob ObjectにChromeを割り当て、MCPクライアント終了時に
+  関連プロセスも終了させます。割り当てに失敗した場合は起動を停止します。
+- **プロファイルの分離**: 普段使っているChromeの履歴や保存済みパスワードとは分離した、
+  プロセスごとの一時プロファイルでブラウザを起動します。
+- **孤立プロセスの回収**: 前回の異常終了で残ったChromeを、プロセスIDと起動時刻を確認して
+  回収します。無関係なChromeを名前だけで終了させることはありません。
 
-ブラウザを使ったWeb処理は、当初[antirez/ds4](https://github.com/antirez/ds4)を
-土台として実装し、その後PythonおよびMCP向けに大幅に再設計しています。適用される
-MITライセンスの通知は[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)を参照してください。
+このサーバーは認証やCAPTCHAを迂回するものではなく、一般的なリモートブラウザ操作APIでも
+ありません。また、任意のページコンテキストJavaScriptを実行するツールは提供しません。
 
-## 開発と検証
+---
 
-開発者向けのセットアップ、テスト、ビルド手順は
-[`CONTRIBUTING.md`](CONTRIBUTING.md)を参照してください。
+## 動作環境と容量の目安
 
-決定的なテストだけを実行する場合は次です。
+- **対応OS**: Windows 10またはWindows 11（64-bit）
+- **Python**: 3.10以上
+- **ブラウザ**: Google Chrome、Google Chrome for Testing、またはChromium
+- **ディスク容量の目安**:
+  - Python仮想環境（依存ライブラリを含む）: 約100MB
+  - 本パッケージのソース: 1MB未満
+  - Chrome for Testing（専用Chromeを配置する場合）: 約485MB
+  - 合計: 約600MB
 
-```bash
-pytest -q -m 'not live'
+すでにGoogle Chromeをインストールしている場合は、Chrome for Testingの容量は必要ありません。
+実際の容量はPythonのバージョンやChromeの更新状況によって変わります。
+
+---
+
+## 更新手順
+
+### ソースコードを取得して利用している場合
+
+ローカルの変更を確認してから、更新内容を取得します。`reset --hard`は作業内容を失う
+おそれがあるため使用しません。
+
+```powershell
+git -C "C:\Users\YOU\chrome-web-mcp" fetch origin
+git -C "C:\Users\YOU\chrome-web-mcp" pull --ff-only
+& "C:\Users\YOU\chrome-web-mcp\.venv\Scripts\python.exe" -m pip install -e "C:\Users\YOU\chrome-web-mcp[test]"
 ```
 
-`live`マーク付きテストは実際にGoogleへ接続するため、ネットワーク状態や
-CAPTCHAの影響で失敗することがあります。
+更新後はMCPクライアントを再起動してください。`uv run`で起動している場合は、次回起動時に
+依存関係が同期されます。
+
+---
+
+## 開発とテスト
+
+開発者向けの環境構築、テスト、ビルド手順は[`CONTRIBUTING.md`](CONTRIBUTING.md)を参照してください。
+
+外部への通信を行わず、毎回同じ結果が得られるテストだけを実行する場合は次を実行します。
+
+```bat
+pytest -q -m "not live"
+```
+
+`live`マーク付きのテストは実際にGoogleへ接続するため、ネットワーク状態やCAPTCHAの発生に
+よって失敗することがあります。
+
+---
+
+## 由来と謝辞
+
+このリポジトリは、[kuraneko1/chrome-web-mcp](https://github.com/kuraneko1/chrome-web-mcp)をもとにした
+独立したWindows向けForkです。[antirez/ds4](https://github.com/antirez/ds4)に含まれていたブラウザを
+使ったWeb処理を出発点にしています。元のプロジェクトのライセンス通知には、
+`The ds4.c authors`と`The ggml authors`の著作権表示が含まれており、その通知は
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)に残しています。
+
+Gitの履歴には、次の著者名と開発の経緯が記録されています。
+
+- `kuraneko1`: `chrome-web-mcp`の初期構造とブラウザ実行基盤を整備。
+- `ryu`: MCP向けの検索・本文取得機能、Markdown整形、設定、ドキュメントを拡充。
+- `_ryu15_`: 対応プラットフォーム範囲を整理し、DS4のライセンス通知を追加。
+
+現在のWindows版は、PythonとMCPの規格に合わせて全面的な再設計・再実装を行ったものです。
+元のコードを単に再配布するものではなく、検索、公開URL取得、本文整形、安全な接続確認、
+レート制限、WindowsのChrome起動・終了処理などを追加・再設計しています。
+基礎となるアイデアを提供した先行開発者と、ds4.c・ggmlの貢献者に感謝します。
+
+---
+
+## ライセンス
+
+このプロジェクトはMITライセンスのもとで公開されています。全文は[`LICENSE`](LICENSE)を
+参照してください。DS4由来の通知は[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)に
+分けて記載しています。
+
+セキュリティ問題の報告方法は[`SECURITY.md`](SECURITY.md)を参照してください。公開Issueには
+実際のパスワード、Cookie、秘密情報を含めないでください。

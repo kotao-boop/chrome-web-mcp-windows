@@ -8,7 +8,7 @@ each other over a shared Chrome profile:
     through after the short retry window;
   - the startup orphan sweep removes per-pid profile dirs whose owner pid is
     dead and keeps ones whose owner is alive.
-Run: .venv/bin/pytest tests/test_locking.py -v
+Run: .venv/Scripts/pytest.exe tests/test_locking.py -v
 """
 
 import importlib.util
@@ -19,8 +19,9 @@ import sys
 import time
 from pathlib import Path
 
-import fcntl
 import pytest
+
+from chrome_web_mcp import platform_runtime
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER_PY = ROOT / "src" / "chrome_web_mcp" / "server.py"
@@ -29,6 +30,25 @@ server = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(server)
 
 BrowserRuntime = server.BrowserRuntime
+
+_DEAD_HOLDER = r"""
+import os, sys, time
+path, dead_pid = sys.argv[1], sys.argv[2]
+f = open(path, 'a+')
+import msvcrt
+f.seek(0, os.SEEK_END)
+if f.tell() < 1:
+    f.write('\n')
+    f.flush()
+f.seek(0)
+msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+f.seek(0)
+f.write('pid=%s start=0\n' % dead_pid)
+f.truncate(f.tell())
+f.flush()
+print('held', flush=True)
+time.sleep(60)
+"""
 
 
 def test_per_session_profile_default_uses_pid():
@@ -49,13 +69,11 @@ def test_per_session_profile_default_uses_pid():
 def test_live_holder_yields_diagnostic_error(tmp_path, monkeypatch):
     lock_path = tmp_path / ".instance.lock"
     monkeypatch.setattr(server, "LOCK_PATH", lock_path)
-    # A live holder: this process takes the flock and records our (alive) pid.
+    # A live holder: this process takes the lock and records our (alive) pid.
     holder = lock_path.open("a+")
-    fcntl.flock(holder.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    holder.seek(0)
-    holder.truncate()
-    holder.write(f"pid={os.getpid()} start={time.time():.6f}\n")
-    holder.flush()
+    platform_runtime.lock_exclusive_nb(holder)
+    platform_runtime.write_lock_holder(holder, os.getpid())
+    platform_runtime.write_holder_record(lock_path, os.getpid())
 
     rt = BrowserRuntime()
     with pytest.raises(RuntimeError) as exc:
@@ -71,20 +89,13 @@ def test_dead_holder_lock_is_reacquired(tmp_path, monkeypatch):
     lock_path = tmp_path / ".instance.lock"
     monkeypatch.setattr(server, "LOCK_PATH", lock_path)
     lock_path.touch()
-    # A dead holder: record a pid that no longer exists and hold the flock in a
-    # subprocess that we kill (the kernel releases the flock with the fd).
+    # A dead holder: record a pid that no longer exists and hold the Windows
+    # lock in a subprocess that we kill (Windows releases the lock with the fd).
     dead_pid_holder = subprocess.Popen(
         [
             sys.executable,
             "-c",
-            (
-                "import fcntl,os,sys,time;"
-                "f=os.fdopen(os.open(sys.argv[1], os.O_RDWR), 'w');"
-                "fcntl.flock(f, fcntl.LOCK_EX);"
-                "f.write(f'pid={sys.argv[2]} start=0\\n');f.flush();"
-                "print('held', flush=True);"
-                "time.sleep(60)"
-            ),
+            _DEAD_HOLDER,
             str(lock_path),
             "99999999",
         ],
@@ -95,15 +106,15 @@ def test_dead_holder_lock_is_reacquired(tmp_path, monkeypatch):
     assert "held" in dead_pid_holder.stdout.readline()
     dead_pid_holder.kill()
     dead_pid_holder.wait()
-    # flock is released with the dead process's fd.
+    # The lock is released with the dead process's fd.
 
     rt = BrowserRuntime()
     rt._acquire_lock()
     try:
-        assert rt.lock_file is not None
-        # Our own pid must now be recorded as holder.
-        content = lock_path.read_text(encoding="utf-8")
-        assert f"pid={os.getpid()}" in content
+            assert rt.lock_file is not None
+            # Our own pid must now be recorded as holder.
+            content = platform_runtime.read_holder_record(lock_path)
+            assert f"pid={os.getpid()}" in content
     finally:
         rt.cleanup()
 
@@ -142,22 +153,32 @@ def test_contender_cleanup_preserves_owners_devtools_file(tmp_path, monkeypatch)
 
 
 def test_stale_process_identity_does_not_signal_reused_pid(monkeypatch):
-    monkeypatch.setattr(server, "_process_identity", lambda pid: {"pid": pid, "start_ticks": "new"})
-    monkeypatch.setattr(server.os, "killpg", lambda *args: pytest.fail("must not signal a reused PID"))
-    server._stop_recorded_process({"pid": 1234, "start_ticks": "old"})
+    monkeypatch.setattr(server, "_process_identity", lambda pid: {"pid": pid, "create_time": "new"})
+    monkeypatch.setattr(
+        server.platform_runtime,
+        "terminate_process_tree",
+        lambda *args, **kwargs: pytest.fail("must not signal a reused PID"),
+    )
+    server._stop_recorded_process({"pid": 1234, "create_time": "old"})
 
 
-def test_sweep_recovers_recorded_display_and_browser(tmp_path, monkeypatch):
+def test_sweep_recovers_recorded_chrome(tmp_path, monkeypatch):
     base = tmp_path / "chrome-web-v2-profile"
     dead = base / "99999999"
     dead.mkdir(parents=True)
-    children = [subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True) for _ in range(2)]
+    children = [
+        subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            **platform_runtime.popen_kwargs(),
+        )
+        for _ in range(2)
+    ]
     try:
         records = [server._process_identity(child.pid) for child in children]
         (dead / ".owned-processes.json").write_text(json.dumps(records))
         monkeypatch.setattr(server.tempfile, "gettempdir", lambda: str(tmp_path))
         BrowserRuntime._sweep_orphans()
-        assert all(child.wait(timeout=5) < 0 for child in children)
+        assert all(child.wait(timeout=5) is not None for child in children)
         assert not dead.exists()
     finally:
         for child in children:

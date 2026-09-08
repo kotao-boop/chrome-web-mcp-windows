@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Focused DS4-derived Google search + URL fetch MCP server.
+"""Focused DS4-derived Google search + URL fetch MCP server for Windows.
 
-Runs a normal Chrome window inside Xvfb, renders pages with JavaScript through
-CDP, and exposes a stateless Google search tool plus a public-URL fetch tool
-(JS-rendered readable text). Fetch targets and their post-redirect final URLs
-are validated fail-closed; arbitrary page-context JavaScript is never exposed.
+Runs native Windows Chrome in visible, off-screen hidden, or headless mode,
+renders pages with JavaScript through CDP, and exposes a stateless Google search
+tool plus a public-URL fetch tool.
+Fetch targets and their post-redirect final URLs are validated fail-closed;
+arbitrary page-context JavaScript is never exposed.
 """
 
 from __future__ import annotations
@@ -12,14 +13,12 @@ from __future__ import annotations
 import asyncio
 import atexit
 import collections
-import fcntl
 import ipaddress
 import itertools
 import json
 import os
 import random
 import re
-import select
 import shutil
 import signal
 import socket
@@ -34,10 +33,12 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 import mcp.types as types
+import psutil
 import websockets
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from chrome_web_mcp.network import PublicNetworkProxy
+from chrome_web_mcp import platform_runtime
 
 try:
     import trafilatura
@@ -50,11 +51,11 @@ except ImportError:  # pragma: no cover - dependency declared in pyproject
 
 HERE = Path(__file__).resolve().parent
 # Each MCP server process (one per Hermes session) gets its OWN throwaway Chrome
-# profile under /tmp, so sessions never contend for a shared profile: a live
+# profile under the Windows temp directory, so sessions never contend for a shared profile: a live
 # second session can no longer wedge this one with "owns this profile". The
 # shared on-disk profile (HERE/chrome-profile) is still supported via the
 # CW_PROFILE_DIR override, for environments that intentionally share one.
-# The instance lock (flock) still guards whichever profile directory is in use;
+# The instance lock still guards whichever profile directory is in use;
 # its holder pid/starttime are embedded so a DEAD holder's stale lock can be
 # recovered automatically instead of blocking forever.
 PROFILE_DIR = (
@@ -170,7 +171,7 @@ async def _resolve_candidate_url(href: str) -> str | None:
         async with httpx.AsyncClient(follow_redirects=False, timeout=8.0) as client:
             response = await client.get(
                 current,
-                headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/150 Safari/537.36"},
+                headers={"User-Agent": _http_user_agent()},
             )
         location = response.headers.get("location")
         if not location or response.status_code not in {301, 302, 303, 307, 308}:
@@ -213,50 +214,43 @@ async def _build_results(
     return results
 
 
+def _http_user_agent() -> str:
+    return (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+    )
+
+
 def _terminate_owned_process(proc: subprocess.Popen | None, timeout: float) -> None:
     if proc is None or proc.poll() is not None:
         return
+    platform_runtime.terminate_process_tree(proc.pid, timeout)
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
-        proc.wait(timeout=timeout)
-    except (ProcessLookupError, subprocess.TimeoutExpired):
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-            proc.wait(timeout=2)
-        except (ProcessLookupError, subprocess.TimeoutExpired):
-            pass
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _process_identity(pid: int) -> dict:
-    """Identify a process without relying on a reusable PID alone (Linux)."""
-    proc_path = Path(f"/proc/{pid}")
-    if proc_path.stat().st_uid != os.getuid():
-        raise ValueError("Process is owned by another user")
-    stat = (proc_path / "stat").read_text()
-    fields = stat[stat.rfind(")") + 2:].split()
-    return {"pid": pid, "start_ticks": fields[19]}
+    """Identify a same-user process without relying on a reusable PID alone."""
+    return platform_runtime.process_identity(pid)
 
 
 def _stop_recorded_process(record: dict) -> None:
-    """Stop only a same-user process group whose leader identity still matches."""
+    """Stop only a same-user process whose birth identity still matches."""
     try:
         pid = int(record["pid"])
-        if pid <= 1 or _process_identity(pid) != record or os.getpgid(pid) != pid:
+        if pid <= 0:
             return
-        os.killpg(pid, signal.SIGTERM)
-        deadline = time.monotonic() + 3
-        while time.monotonic() < deadline:
-            if _process_identity(pid) != record:
-                return
-            time.sleep(0.05)
-        if _process_identity(pid) == record:
-            os.killpg(pid, signal.SIGKILL)
-    except (OSError, ValueError, KeyError, TypeError, IndexError):
+        if _process_identity(pid) != record:
+            return
+        platform_runtime.terminate_process_tree(pid, 3)
+    except (OSError, psutil.Error, ValueError, KeyError, TypeError, IndexError, ProcessLookupError):
         return
 
 
 _CONFIG_DEFAULTS = {
-    "show_browser": True,  # true: visible Xephyr window | false: hidden Xvfb
+    "show_browser": True,  # Windows: native/hidden
     "hl": "ja",
     "gl": "jp",
     "limit": 5,
@@ -277,13 +271,14 @@ def _warn_config(message: str) -> None:
 def _load_config() -> dict:
     """Load the optional JSON config file; fall back to defaults per key.
 
-    Path from CW_CONFIG, else ~/.config/chrome-web-mcp/config.json when it
-    exists. Invalid keys/values warn on stderr and keep the default value.
+    The path comes from CW_CONFIG or the Windows AppData config location.
+    Invalid keys/values warn on stderr and keep the default value.
     """
     raw_path = os.environ.get("CW_CONFIG", "").strip()
-    path = Path(raw_path).expanduser() if raw_path else (
-        Path.home() / ".config" / "chrome-web-mcp" / "config.json"
-    )
+    if raw_path:
+        path = Path(raw_path).expanduser()
+    else:
+        path = platform_runtime.default_config_path()
     cfg: dict[str, Any] = dict(_CONFIG_DEFAULTS)
     if not path.is_file():
         if raw_path:
@@ -352,26 +347,31 @@ CONFIG = _load_config()
 
 
 class BrowserRuntime:
-    """Own one isolated Xvfb/Chrome pair for this MCP process."""
+    """Own one isolated native Windows Chrome session."""
 
     def __init__(self) -> None:
-        self.xvfb: subprocess.Popen | None = None
-        self.xephyr: subprocess.Popen | None = None
         self.chrome: subprocess.Popen | None = None
+        self.job: platform_runtime.WindowsJob | None = None
+        self.window_hider: platform_runtime.WindowsWindowHider | None = None
         self.lock_file: Any = None
-        self.display: str | None = None
         self.port: int | None = None
         self.browser_ws: str | None = None
         self.proxy: PublicNetworkProxy | None = None
-        self.xpra_server: subprocess.Popen | None = None
-        self.xpra_client: subprocess.Popen | None = None
-        self.user_display = os.environ.get("DISPLAY")
         # CW_DISPLAY_MODE is an advanced environment override. The JSON
         # show_browser boolean is the user-facing switch.
         env_display_mode = os.environ.get("CW_DISPLAY_MODE", "").strip().lower()
-        self.display_mode = env_display_mode or (
-            "xephyr" if CONFIG["show_browser"] else "xvfb"
-        )
+        try:
+            self.display_mode = platform_runtime.browser_mode(
+                bool(CONFIG["show_browser"]), env_display_mode
+            )
+        except ValueError as exc:
+            _warn_config(str(exc))
+            self.display_mode = platform_runtime.browser_mode(bool(CONFIG["show_browser"]), "")
+        self.gpu_info: dict[str, Any] = {
+            "gpu_device": None,
+            "gpu_renderer": None,
+            "gpu_backend": "UNKNOWN",
+        }
         # A long-lived background search tab, reused across queries so we do not
         # repeatedly open/close targets (which looks like bot activity to Google).
         self.search_target_id: str | None = None
@@ -385,147 +385,15 @@ class BrowserRuntime:
     Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
     window.chrome = window.chrome || { runtime: {} };
     Object.defineProperty(navigator, 'languages', {get: () => ['ja-JP', 'ja', 'en-US', 'en']});
-    Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
-    const _qp = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function (p) {
-      if (p === 37445) return 'Intel Inc.';
-      if (p === 37446) return 'Intel Iris OpenGL Engine';
-      return _qp.call(this, p);
-    };
     """
 
     @staticmethod
-    def _browser_environment(display: str) -> dict[str, str]:
-        """Force Chrome onto the private Xvfb display, never the user Wayland session."""
-        env = os.environ.copy()
-        env["DISPLAY"] = display
-        env["XDG_SESSION_TYPE"] = "x11"
-        for key in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
-            env.pop(key, None)
-        return env
-
-    @staticmethod
-    def _discover_xauthority() -> str | None:
-        """Find the Xauthority file needed to connect to a desktop Xwayland."""
-        configured = os.environ.get("XAUTHORITY", "").strip()
-        if configured and Path(configured).is_file():
-            return configured
-
-        runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "").strip()
-        if runtime_dir:
-            candidates = list(Path(runtime_dir).glob(".mutter-Xwaylandauth.*"))
-            candidates = [path for path in candidates if path.is_file()]
-            if candidates:
-                candidates.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
-                return str(candidates[0])
-
-        home_xauthority = Path.home() / ".Xauthority"
-        if home_xauthority.is_file():
-            return str(home_xauthority)
-        return None
-
-    def _human_display_environment(self) -> dict[str, str]:
-        """Prepare an X11 client environment for the user's desktop display."""
-        env = os.environ.copy()
-        env["DISPLAY"] = self.user_display or ""
-        env["XDG_SESSION_TYPE"] = "x11"
-        xauthority = self._discover_xauthority()
-        if xauthority:
-            env["XAUTHORITY"] = xauthority
-        for key in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET"):
-            env.pop(key, None)
-        return env
-
-    def hide_for_human(self) -> None:
-        """Stop the temporary Xpra shadow server and its visible client."""
-        _terminate_owned_process(self.xpra_client, 3)
-        _terminate_owned_process(self.xpra_server, 3)
-        self.xpra_client = None
-        self.xpra_server = None
-
-    def expose_for_human(self) -> None:
-        """Attach the private Xvfb display to the user's desktop via Xpra."""
-        if not self.display:
-            raise RuntimeError("CAPTCHA browser display is not ready")
-        if not self.user_display:
-            raise RuntimeError("CAPTCHA display is unavailable: user DISPLAY is not set")
-        if self.xpra_client and self.xpra_client.poll() is None:
-            return
-        xpra = shutil.which("xpra")
-        if not xpra:
-            raise RuntimeError("Xpra is not installed; install the xpra package to solve CAPTCHA")
-        self.hide_for_human()
-        server_env = self._browser_environment(self.display)
-        self.xpra_server = subprocess.Popen(
-            [
-                xpra,
-                "shadow",
-                self.display,
-                "--daemon=no",
-                "--mdns=no",
-                "--notifications=no",
-                "--bell=no",
-                "--system-tray=no",
-            ],
-            env=server_env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        client_env = self._human_display_environment()
-        ready = False
-        for _ in range(40):
-            if self.xpra_server.poll() is not None:
-                break
-            status = subprocess.run(
-                [xpra, "list"],
-                env=client_env,
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-            if self.display in status.stdout:
-                ready = True
-                break
-            time.sleep(0.25)
-        if not ready:
-            self.hide_for_human()
-            raise RuntimeError("Xpra shadow session did not become ready")
-        self.xpra_client = subprocess.Popen(
-            [
-                xpra,
-                "attach",
-                self.display,
-                "--opengl=no",
-                "--clipboard=no",
-                "--notifications=no",
-                "--bell=no",
-                "--system-tray=no",
-            ],
-            env=client_env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        time.sleep(0.25)
-        if self.xpra_client.poll() is not None:
-            self.hide_for_human()
-            raise RuntimeError("Xpra attach client exited before showing the browser")
+    def _stealth_init_js() -> str:
+        return BrowserRuntime._STEALTH_INIT_JS
 
     @staticmethod
     def _chrome_executable() -> str:
-        configured = os.environ.get("CW_CHROME")
-        candidates = [configured] if configured else []
-        candidates += [
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-        ]
-        for candidate in candidates:
-            if candidate and os.access(candidate, os.X_OK):
-                return candidate
-        raise RuntimeError("No supported Chrome/Chromium executable found")
+        return platform_runtime.discover_chrome()
 
     def _acquire_lock(self) -> None:
         """Acquire the profile lock, embedding our pid/starttime for forensics.
@@ -542,7 +410,7 @@ class BrowserRuntime:
         while True:
             lock_file = LOCK_PATH.open("a+")
             try:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                platform_runtime.lock_exclusive_nb(lock_file)
             except BlockingIOError:
                 lock_file.close()
                 if time.monotonic() - start > 4.0:
@@ -550,17 +418,15 @@ class BrowserRuntime:
                         "Another chrome-web MCP instance owns this profile "
                         f"({LOCK_PATH}). {self._holder_diagnosis()} A live second "
                         "session is expected to hold its own lock independently; "
-                        "if this persists, check for a stale chrome-web-v2 server "
-                        "process (ps aux | grep chrome-web-v2/server.py)."
+                        "if this persists, check for a stale chrome-web-mcp server "
+                        "process."
                     ) from None
                 time.sleep(0.25)
                 continue
             # Record who holds the lock (best-effort, never fatal).
             try:
-                lock_file.seek(0)
-                lock_file.truncate()
-                lock_file.write(f"pid={os.getpid()} start={time.time():.6f}\n")
-                lock_file.flush()
+                platform_runtime.write_lock_holder(lock_file, os.getpid())
+                platform_runtime.write_holder_record(LOCK_PATH, os.getpid())
             except OSError:
                 pass
             self.lock_file = lock_file
@@ -569,10 +435,9 @@ class BrowserRuntime:
     @staticmethod
     def _holder_diagnosis() -> str:
         """Read the embedded holder pid from the lock file and report its state."""
-        try:
-            content = LOCK_PATH.read_text(encoding="utf-8").strip()
-        except OSError:
-            return "No holder recorded in the lock file."
+        content = platform_runtime.read_holder_record(LOCK_PATH)
+        if not content:
+            return "Holder is ALIVE (lock is held; holder details unavailable)."
         pid = None
         for field in content.split():
             if field.startswith("pid="):
@@ -582,33 +447,26 @@ class BrowserRuntime:
                     pid = None
         if pid is None:
             return f"Lock content: {content[:80]!r} (no pid recorded)."
-        stat_path = Path(f"/proc/{pid}/stat")
-        try:
-            stat = stat_path.read_text(encoding="utf-8")
-            comm = stat[stat.rfind(")") + 2 :].split()
-            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")[0].decode(
-                "utf-8", "replace"
-            )
+        alive, command = platform_runtime.process_summary(pid)
+        if alive:
             return (
-                f"Holder pid {pid} is ALIVE ({cmdline[:120] or comm[0] if comm else 'unknown'}); "
+                f"Holder pid {pid} is ALIVE ({command or 'unknown'}); "
                 "it owns the lock legitimately and will release it on exit."
             )
-        except OSError:
-            return (
-                f"Holder pid {pid} is DEAD — the flock released automatically; "
-                "this instance is acquiring the freed lock."
-            )
+        return (
+            f"Holder pid {pid} is DEAD — the lock released automatically; "
+            "this instance is acquiring the freed lock."
+        )
 
     @staticmethod
     def _sweep_orphans() -> None:
-        """Kill orphaned Chrome/Xvfb and remove per-session profile dirs whose
-        owning MCP server process is dead (crash / kill -9 leftovers)."""
+        """Kill orphaned Chrome and remove profiles left by a crashed server."""
         base = Path(tempfile.gettempdir()) / "chrome-web-v2-profile"
         if not base.is_dir():
             return
         for entry in base.iterdir():
             try:
-                eligible = not entry.is_symlink() and entry.is_dir() and entry.stat().st_uid == os.getuid()
+                eligible = not entry.is_symlink() and entry.is_dir() and platform_runtime.owns_directory(entry)
             except OSError:
                 # Another starting server may already have reaped this entry.
                 continue
@@ -620,37 +478,26 @@ class BrowserRuntime:
                 continue
             if pid == os.getpid():
                 continue
+            if platform_runtime.pid_is_alive(pid):
+                continue
+            # Process birth identity avoids terminating an unrelated reused PID.
             try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                # New profiles record Chrome AND the private display, including
-                # start ticks to avoid terminating an unrelated reused PID.
-                try:
-                    records = json.loads((entry / ".owned-processes.json").read_text())
-                    if isinstance(records, list):
-                        for record in records:
-                            if isinstance(record, dict):
-                                _stop_recorded_process(record)
-                except (OSError, ValueError):
-                    pass
-                # Upgrade path for old profiles: exact argv matching, never
-                # pkill regexes or option-like patterns. Old Xvfb cannot be
-                # safely identified without a manifest, so leave it alone.
-                for proc_path in Path("/proc").iterdir():
-                    if not proc_path.name.isdigit():
-                        continue
-                    try:
-                        args = (proc_path / "cmdline").read_bytes().split(b"\0")
-                        if os.fsencode(f"--user-data-dir={entry}") in args:
-                            _stop_recorded_process(_process_identity(int(proc_path.name)))
-                    except (OSError, ValueError, IndexError):
-                        pass
-                try:
-                    shutil.rmtree(entry, ignore_errors=True)
-                except OSError:
-                    pass
+                records = json.loads((entry / ".owned-processes.json").read_text())
+                if isinstance(records, list):
+                    for record in records:
+                        if isinstance(record, dict):
+                            _stop_recorded_process(record)
+            except (OSError, ValueError):
+                pass
+            # Upgrade path for old profiles: exact argv matching, never pkill
+            # regexes or option-like patterns.
+            for record in platform_runtime.processes_with_exact_arg(
+                f"--user-data-dir={entry}"
+            ):
+                _stop_recorded_process(record)
+            try:
+                shutil.rmtree(entry, ignore_errors=True)
             except OSError:
-                # EPERM: owner alive (or a kernel pid we cannot signal) — keep it.
                 pass
 
     def _record_processes(self) -> None:
@@ -658,135 +505,17 @@ class BrowserRuntime:
             return
         PROFILE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         records = []
-        for proc in (self.chrome, self.xephyr, self.xvfb):
-            if proc is not None and proc.poll() is None:
-                records.append(_process_identity(proc.pid))
+        if self.chrome is not None and self.chrome.poll() is None:
+            records.append(_process_identity(self.chrome.pid))
         pending = PROFILE_DIR / ".owned-processes.tmp"
         pending.write_text(json.dumps(records))
         pending.replace(PROFILE_DIR / ".owned-processes.json")
 
-    def _start_xvfb(self) -> str:
-        proc = subprocess.Popen(
-            ["Xvfb", "-displayfd", "1", "-screen", "0", "1365x900x24", "-nolisten", "tcp"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            start_new_session=True,
-        )
-        self.xvfb = proc
-        self._record_processes()
-        assert proc.stdout is not None
-        ready, _, _ = select.select([proc.stdout], [], [], 10)
-        if not ready:
-            raise RuntimeError("Xvfb did not allocate a display within 10 seconds")
-        number = proc.stdout.readline().strip()
-        if not number.isdigit():
-            raise RuntimeError("Xvfb returned an invalid display number")
-        display = f":{number}"
-        for _ in range(30):
-            check = subprocess.run(
-                ["xdpyinfo", "-display", display],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-            )
-            if check.returncode == 0:
-                return display
-            if proc.poll() is not None:
-                break
-            time.sleep(0.1)
-        raise RuntimeError("Xvfb failed its readiness check")
-
-    def _start_xephyr(self, host_display: str) -> str:
-        """Start a nested Xephyr window on the user's desktop and return its display.
-
-        Xephyr is a plain X client: it appears as one ordinary window the user
-        can minimize, move to another workspace, or close. Chrome runs *inside*
-        it, so tool calls can never pop a window to the front of the desktop
-        the way running Chrome directly on DISPLAY would.
-        """
-        env = self._human_display_environment()
-        env["DISPLAY"] = host_display
-        # Arm a minimize helper BEFORE Xephyr maps its window: `xdotool search
-        # --sync` blocks until the window appears, then minimizes it within
-        # milliseconds. Starting minimized this way leaves (almost) no visible
-        # flash, unlike sleep-then-minimize after the fact.
-        try:
-            minimizer = subprocess.Popen(
-                ["xdotool", "search", "--sync", "--onlyvisible", "--name", "chrome-web-mcp", "windowminimize"],
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except OSError:
-            minimizer = None
-        try:
-            proc = subprocess.Popen(
-                [
-                    "Xephyr",
-                    "-displayfd",
-                    "1",
-                    "-screen",
-                    "1365x900x24",
-                    "-title",
-                    "chrome-web-mcp",
-                    "-nolisten",
-                    "tcp",
-                ],
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                start_new_session=True,
-            )
-        except Exception:
-            _terminate_owned_process(minimizer, 2)
-            raise
-        self.xephyr = proc
-        self._record_processes()
-        assert proc.stdout is not None
-        ready, _, _ = select.select([proc.stdout], [], [], 10)
-        if not ready:
-            _terminate_owned_process(minimizer, 2)
-            raise RuntimeError("Xephyr did not allocate a display within 10 seconds")
-        number = proc.stdout.readline().strip()
-        if not number.isdigit():
-            _terminate_owned_process(minimizer, 2)
-            raise RuntimeError(
-                "Xephyr could not allocate a nested display. "
-                "Check DISPLAY and XAUTHORITY access to the desktop X server."
-            )
-        display = f":{number}"
-        for _ in range(30):
-            check = subprocess.run(
-                ["xdpyinfo", "-display", display],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-            )
-            if check.returncode == 0:
-                if minimizer is not None:
-                    try:
-                        minimizer.wait(timeout=10)
-                    except subprocess.SubprocessError:
-                        _terminate_owned_process(minimizer, 2)
-                return display
-            if proc.poll() is not None:
-                break
-            time.sleep(0.1)
-        _terminate_owned_process(minimizer, 2)
-        raise RuntimeError("Xephyr failed its readiness check")
-
-    def _start_chrome(self, display: str) -> tuple[int, str]:
-        PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-        DEVTOOLS_FILE.unlink(missing_ok=True)
-        env = self._browser_environment(display)
+    def _chrome_command(self) -> list[str]:
         if self.proxy is None:
             raise RuntimeError("Public-network proxy is not ready")
         command = [
             self._chrome_executable(),
-            "--ozone-platform=x11",
             "--remote-debugging-address=127.0.0.1",
             "--remote-debugging-port=0",
             f"--proxy-server={self.proxy.url}",
@@ -797,28 +526,61 @@ class BrowserRuntime:
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-sync",
-            "--password-store=basic",
-            "--disable-gpu",
-            "--disable-dev-shm-usage",
             "--mute-audio",
             "--disable-blink-features=AutomationControlled",
             "--lang=ja-JP",
             "--window-size=1365,900",
-            "--window-position=0,0",
             "about:blank",
         ]
-        if os.geteuid() == 0:
-            command.insert(1, "--no-sandbox")
+        if self.display_mode == "headless":
+            command.insert(1, "--headless=new")
+        elif self.display_mode == "hidden":
+            command[1:1] = ["--start-minimized", "--window-position=-32000,-32000"]
+        else:
+            command.insert(-1, "--window-position=0,0")
+        return command
+
+    def _assign_windows_job(self, pid: int) -> None:
+        job = self.job
+        if job is None:
+            try:
+                job = platform_runtime.WindowsJob()
+            except OSError as exc:
+                raise RuntimeError(
+                    "Could not create the Windows Job Object for Chrome; "
+                    f"refusing to start an untracked browser: {exc}"
+                ) from exc
+        try:
+            job.assign(pid)
+        except OSError as exc:
+            job.close()
+            if self.job is job:
+                self.job = None
+            raise RuntimeError(
+                "Could not attach Chrome to the Windows Job Object; "
+                f"refusing to start an untracked browser: {exc}"
+            ) from exc
+        self.job = job
+
+    def _start_chrome(self) -> tuple[int, str]:
+        PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        DEVTOOLS_FILE.unlink(missing_ok=True)
+        command = self._chrome_command()
         proc = subprocess.Popen(
             command,
-            env=env,
+            env=os.environ.copy(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            start_new_session=True,
+            **platform_runtime.popen_kwargs(),
         )
         self.chrome = proc
+        self._assign_windows_job(proc.pid)
+        if self.display_mode == "hidden":
+            self.window_hider = platform_runtime.WindowsWindowHider(proc.pid)
+            self.window_hider.start()
         self._record_processes()
-        deadline = time.monotonic() + 20
+        startup_timeout = 30
+        deadline = time.monotonic() + startup_timeout
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 raise RuntimeError(f"Chrome exited before CDP was ready ({proc.returncode})")
@@ -826,10 +588,12 @@ class BrowserRuntime:
                 lines = DEVTOOLS_FILE.read_text(encoding="utf-8").splitlines()
                 port = int(lines[0])
                 path = lines[1]
+                if self.display_mode == "hidden" and proc.pid:
+                    platform_runtime.hide_process_windows(proc.pid)
                 return port, f"ws://127.0.0.1:{port}{path}"
             except (FileNotFoundError, IndexError, ValueError):
                 time.sleep(0.1)
-        raise RuntimeError("Chrome did not expose CDP within 20 seconds")
+        raise RuntimeError(f"Chrome did not expose CDP within {startup_timeout} seconds")
 
     def ensure(self) -> str:
         if self.chrome and self.chrome.poll() is None and self.browser_ws:
@@ -838,33 +602,30 @@ class BrowserRuntime:
         self._acquire_lock()
         try:
             self.proxy = PublicNetworkProxy()
-            if self.display_mode == "xephyr":
-                if not self.user_display:
-                    raise RuntimeError(
-                        "CW_DISPLAY_MODE=xephyr needs a user DISPLAY, but none is set"
-                    )
-                self.display = self._start_xephyr(self.user_display)
-            else:
-                self.display = self._start_xvfb()
-            self.port, self.browser_ws = self._start_chrome(self.display)
+            self.port, self.browser_ws = self._start_chrome()
             return self.browser_ws
         except Exception:
             self.cleanup()
             raise
 
     def cleanup(self) -> None:
-        self.hide_for_human()
+        if self.window_hider is not None:
+            self.window_hider.close()
+            self.window_hider = None
         _terminate_owned_process(self.chrome, 5)
-        _terminate_owned_process(self.xephyr, 3)
-        _terminate_owned_process(self.xvfb, 3)
+        if self.job is not None:
+            self.job.close()
+            self.job = None
         self.chrome = None
-        self.xephyr = None
-        self.xvfb = None
-        self.display = None
         self.port = None
         self.browser_ws = None
         self.search_target_id = None
         self.fetch_target_id = None
+        self.gpu_info = {
+            "gpu_device": None,
+            "gpu_renderer": None,
+            "gpu_backend": "UNKNOWN",
+        }
         if self.proxy is not None:
             self.proxy.close()
             self.proxy = None
@@ -872,13 +633,14 @@ class BrowserRuntime:
             try:
                 DEVTOOLS_FILE.unlink(missing_ok=True)
                 (PROFILE_DIR / ".owned-processes.json").unlink(missing_ok=True)
-                if not os.environ.get("CW_PROFILE_DIR"):
-                    # SIGTERM uses os._exit, so atexit alone cannot remove it.
-                    shutil.rmtree(PROFILE_DIR, ignore_errors=True)
-                fcntl.flock(self.lock_file.fileno(), fcntl.LOCK_UN)
+                platform_runtime.holder_record_path(LOCK_PATH).unlink(missing_ok=True)
+                platform_runtime.unlock(self.lock_file)
             finally:
                 self.lock_file.close()
                 self.lock_file = None
+            if not os.environ.get("CW_PROFILE_DIR"):
+                # Close the lock file first: Windows cannot rmtree an open handle.
+                shutil.rmtree(PROFILE_DIR, ignore_errors=True)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -953,8 +715,8 @@ class SharedSearchRateLimiter:
 
 
 _RUNTIME = BrowserRuntime()
-# Reap crash/kill -9 leftovers from previous sessions (dead per-pid profile
-# dirs and their orphaned Chrome/Xvfb) before this session needs a browser.
+# Reap crash/kill -9 leftovers from previous sessions before this session needs
+# a browser.
 BrowserRuntime._sweep_orphans()
 
 # Serialize searches within this process and reserve a shared inter-process slot.
@@ -1008,6 +770,41 @@ async def _cdp_call(connection: Any, method: str, params: dict | None = None) ->
             if "error" in message:
                 raise RuntimeError(f"CDP {method} failed: {message['error']}")
             return message.get("result", {})
+
+
+async def _collect_gpu_info(browser: Any) -> None:
+    """Best-effort Chrome GPU diagnostics from the browser-level CDP socket."""
+    if _RUNTIME.gpu_info.get("gpu_renderer") or _RUNTIME.gpu_info.get("gpu_backend") != "UNKNOWN":
+        return
+    try:
+        result = await _cdp_call(browser, "SystemInfo.getInfo")
+        gpu = result.get("gpu", {}) if isinstance(result, dict) else {}
+        devices = gpu.get("devices", []) if isinstance(gpu, dict) else []
+        aux = gpu.get("auxAttributes", {}) if isinstance(gpu, dict) else {}
+        device = devices[0] if devices and isinstance(devices[0], dict) else {}
+        renderer = str(
+            aux.get("glRenderer") or aux.get("renderer") or device.get("deviceString") or ""
+        ).strip()
+        vendor = str(device.get("vendorString") or aux.get("glVendor") or "").strip()
+        implementation = str(aux.get("glImplementationParts") or "").strip()
+        blob = " ".join([renderer, vendor, implementation]).lower()
+        if "swiftshader" in blob or "software" in blob:
+            backend = "SOFTWARE"
+        elif "d3d11" in blob or "direct3d" in blob:
+            backend = "D3D11"
+        elif "d3d12" in blob:
+            backend = "D3D12"
+        elif "vulkan" in blob:
+            backend = "VULKAN"
+        else:
+            backend = "UNKNOWN"
+        _RUNTIME.gpu_info = {
+            "gpu_device": str(device.get("deviceString") or "").strip() or None,
+            "gpu_renderer": renderer or None,
+            "gpu_backend": backend,
+        }
+    except Exception:
+        return
 
 
 async def _evaluate(connection: Any, expression: str) -> Any:
@@ -1167,6 +964,7 @@ async def _extract_google_candidates(
     browser = await websockets.connect(browser_ws, max_size=MAX_CDP_MESSAGE)
     page: Any = None
     try:
+        await _collect_gpu_info(browser)
         try:
             page, _tid, _reused = await _ensure_search_page(browser)
         except Exception:
@@ -1182,7 +980,7 @@ async def _extract_google_candidates(
             await _cdp_call(
                 page,
                 "Page.addScriptToEvaluateOnNewDocument",
-                {"source": BrowserRuntime._STEALTH_INIT_JS},
+                {"source": BrowserRuntime._stealth_init_js()},
             )
         except Exception:
             pass
@@ -1201,15 +999,7 @@ async def _extract_google_candidates(
         if _is_google_challenge(final_url, body_text):
             global _LAST_CAPTCHA_TS
             _LAST_CAPTCHA_TS = time.time()
-            if _xpra_expose_enabled():
-                try:
-                    await asyncio.to_thread(_RUNTIME.expose_for_human)
-                    detail = "Xpra has shown the CAPTCHA browser window; solve it, then retry the same search."
-                except Exception as exc:
-                    detail = f"CAPTCHA detected, but the browser could not be shown: {exc}"
-            else:
-                detail = _captcha_detail_for_mode()
-            raise CaptchaRequired(detail)
+            raise CaptchaRequired(_captcha_detail_for_mode())
         raw = await _read_page_string(page, _EXTRACT_RESULTS_JS)
         candidates = json.loads(raw or "[]")
         if not isinstance(candidates, list):
@@ -1225,18 +1015,16 @@ async def _extract_google_candidates(
         await browser.close()
 
 
-def _xpra_expose_enabled() -> bool:
-    """Xpra auto-attach is opt-in: it once crashed the desktop session."""
-    return os.environ.get("CW_XPRA_EXPOSE", "").strip() == "1"
-
-
 def _captcha_detail_for_mode() -> str:
-    if _RUNTIME.display_mode == "xephyr":
+    if _RUNTIME.display_mode == "native":
         return (
-            "Google CAPTCHA detected. Solve it in the chrome-web-mcp window "
+            "Google CAPTCHA detected. Solve it in the Chrome window "
             "on your desktop, then retry the same search."
         )
-    return "Google CAPTCHA detected. Wait a while, then retry the same search."
+    return (
+        "Google CAPTCHA detected in a hidden or headless Chrome window. "
+        "Restart with show_browser=true, solve it, then retry the same search."
+    )
 
 
 async def _search_google(
@@ -1256,7 +1044,6 @@ async def _search_google(
     results = await _build_results(candidates, limit, resolve_url=_resolve_candidate_url)
     if not results:
         raise RuntimeError("Google rendered no usable external search results")
-    await asyncio.to_thread(_RUNTIME.hide_for_human)
     return results, wait_for, _pace_warning(pace_count)
 
 
@@ -1388,6 +1175,7 @@ async def _fetch_page(url: str, char_limit: int, format: str = "text") -> dict:
     page: Any = None
     target_id: str | None = None
     try:
+        await _collect_gpu_info(browser)
         created = await _cdp_call(
             browser,
             "Target.createTarget",
@@ -1501,7 +1289,7 @@ async def list_tools() -> list[types.Tool]:
             name="google_search",
             description=(
                 "Search Google in a JavaScript-rendering Chrome browser running "
-                "non-headless inside Xvfb. Returns structured search results. "
+                "in the platform browser backend. Returns structured search results. "
                 "Workflow: first google_search, then fetch_url on interesting "
                 "result URLs for full text. Pace calls: bursts of 15+ searches "
                 "per minute raise a pace_warning and risk a Google CAPTCHA."
@@ -1535,7 +1323,7 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="fetch_url",
             description=(
-                "Fetch a public HTTP(S) URL with JavaScript rendering (Xvfb Chrome) "
+                "Fetch a public HTTP(S) URL with JavaScript-rendering Chrome "
                 "and return shaped readable markdown plus requested/final URLs, "
                 "redirect flag, and total_chars. The markdown is shaped "
                 "(boilerplate removed, extraction method reported); if content "
@@ -1586,10 +1374,8 @@ async def list_tools() -> list[types.Tool]:
 
 
 def _health_status() -> dict:
-    """Collect display/browser/queue/CAPTCHA health without starting anything."""
+    """Collect Windows browser/queue/CAPTCHA health without starting anything."""
     chrome_alive = _RUNTIME.chrome is not None and _RUNTIME.chrome.poll() is None
-    xvfb_alive = _RUNTIME.xvfb is not None and _RUNTIME.xvfb.poll() is None
-    xephyr_alive = _RUNTIME.xephyr is not None and _RUNTIME.xephyr.poll() is None
     queue_wait_s = 0.0
     try:
         connection = _SEARCH_LIMITER._connect()
@@ -1605,11 +1391,23 @@ def _health_status() -> dict:
     except Exception:
         queue_wait_s = -1.0
     pace_count = _peek_search_count()
+    chrome_binary: str | None = None
+    chrome_version: str | None = None
+    chrome_detection_error: str | None = None
+    try:
+        chrome_binary = _RUNTIME._chrome_executable()
+        chrome_version = platform_runtime.chrome_version(chrome_binary)
+    except Exception as exc:
+        chrome_detection_error = str(exc)
     return {
+        "platform": platform_runtime.platform_description(),
         "display_mode": _RUNTIME.display_mode,
+        "chrome_binary": chrome_binary,
+        "chrome_version": chrome_version,
+        "chrome_detection_error": chrome_detection_error,
         "chrome_alive": chrome_alive,
-        "xvfb_alive": xvfb_alive,
-        "xephyr_alive": xephyr_alive,
+        "windows_job_attached": _RUNTIME.job is not None,
+        **_RUNTIME.gpu_info,
         "rate_limiter_queue_wait_s": round(queue_wait_s, 3),
         "rate_limit_min_delay_s": _SEARCH_LIMITER.min_delay,
         "rate_limit_max_delay_s": _SEARCH_LIMITER.max_delay,
@@ -1687,7 +1485,7 @@ async def main() -> None:
         _RUNTIME.cleanup()
         # The stdio transport's writer task blocks on open pipes; os._exit is
         # the deterministic way to leave without waiting on the task group.
-        # All owned processes (Chrome, Xvfb) are already terminated above.
+        # Chrome and its child processes are already terminated above.
         os._exit(0)
 
     async def _on_stop(signum: int) -> None:
@@ -1712,11 +1510,17 @@ async def main() -> None:
         # transport context so the reader/writer tasks wind down normally.
 
 
-atexit.register(_RUNTIME.cleanup)
-if not os.environ.get("CW_PROFILE_DIR"):
-    # Throwaway per-session profile: remove it on process exit (the startup
-    # sweep also reaps these if the process is killed hard).
-    atexit.register(lambda: shutil.rmtree(PROFILE_DIR, ignore_errors=True))
+def _cleanup_at_exit() -> None:
+    """Close the lock before removing a throwaway Windows profile directory."""
+    _RUNTIME.cleanup()
+    if not os.environ.get("CW_PROFILE_DIR"):
+        # The startup sweep also reaps this directory if the process is killed
+        # hard, but normal exit should remove it without relying on ordering
+        # between multiple atexit callbacks.
+        shutil.rmtree(PROFILE_DIR, ignore_errors=True)
+
+
+atexit.register(_cleanup_at_exit)
 
 
 def run() -> None:

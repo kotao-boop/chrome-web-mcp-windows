@@ -1,165 +1,102 @@
 # chrome-web-mcp
 
+[![Verify](https://github.com/kotao-boop/chrome-web-mcp-windows/actions/workflows/verify.yml/badge.svg)](https://github.com/kotao-boop/chrome-web-mcp-windows/actions/workflows/verify.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 [日本語版 README](README.jp.md)
 
-> **Supported OS: Linux only.** Windows and macOS are not supported. Using
-> Docker does not change the host OS support policy.
+> This repository is an independent Windows-focused fork of
+> [kuraneko1/chrome-web-mcp](https://github.com/kuraneko1/chrome-web-mcp). It is
+> not an official Windows edition of the upstream project and is not endorsed
+> by the upstream maintainers.
+
+`chrome-web-mcp` is a Model Context Protocol (MCP) server that lets AI tools
+use Google Chrome to retrieve Google search results and readable web-page text.
+It runs on Windows 10 and Windows 11.
+
+It provides three main tools:
+
+- `google_search`: Runs a Google search and returns structured data such as
+  titles, URLs, and descriptions.
+- `fetch_url`: Fetches a public web page and returns its readable content without
+  unnecessary page decoration.
+- `health_check`: Reports browser status, search queue wait time, and CAPTCHA
+  state.
+
+---
+
+## Table of contents
+
+1. [Important prerequisites and cautions](#important-prerequisites-and-cautions)
+2. [Main features](#main-features)
+3. [Quickstart](#quickstart)
+4. [Tool details and specifications](#tool-details-and-specifications)
+5. [Configuration and customization](#configuration-and-customization)
+6. [CAPTCHA handling](#captcha-handling)
+7. [Safety and security design](#safety-and-security-design)
+8. [Environment and storage requirements](#environment-and-storage-requirements)
+9. [Updating](#updating)
+10. [Development and testing](#development-and-testing)
+11. [Origins and acknowledgements](#origins-and-acknowledgements)
+12. [License](#license)
+
+---
+
+## Important prerequisites and cautions
+
+> **Windows only (Windows 10 / Windows 11)**
+> This software is designed and tested for Windows. Windows is the only
+> supported operating system. No additional display server is required; it
+> runs with standard Windows capabilities.
 
 > [!CAUTION]
-> Single-session use only: one client process, one browser, sequential searches.
+> **Search frequency and browser startup**
+> Each MCP server process starts one browser. Searches are processed in order
+> instead of being sent as a large burst.
 >
-> - Normal use never trips the limiter: `pace_warning` fires only at 15+
->   searches per minute. Sequential or lightly-parallel use stays far below it.
-> - A warning is advisory, not a block: searches keep running. But Google
->   counts total volume too — sustained barrages end in CAPTCHA regardless of
->   pacing (observed after dozens of searches in one session). When challenged:
->   wait a few minutes and retry in headless (`xvfb`) mode — it usually clears
->   by itself; in visible (`xephyr`) mode, solve the challenge in the
->   `chrome-web-mcp` window yourself, then retry. `last_captcha_at` in
->   `health_check` shows the last hit.
-> - opencode + subagents: SAFE. All agents share one server process and one
->   browser. Concurrent searches are pooled in a shared query queue
->   (per-process lock + SQLite pacing) and executed sequentially — verified
->   with 3 simultaneous subagents and 35 rapid searches, no CAPTCHA.
-> - Separate processes at once are NOT absorbed: each process spawns its OWN
->   browser, so parallel CLIs look like fresh users hitting Google together.
->   Each one can be CAPTCHA-challenged independently (observed). Stagger starts
->   by seconds or raise `CW_MIN_DELAY` / `CW_MAX_DELAY`.
+> - Normal use should not hit the rate limiter. Starting 15 or more searches in
+>   one minute produces a `pace_warning`.
+> - A warning does not stop the search. However, excessive repeated requests
+>   can cause Google to present a CAPTCHA (a “prove you are not a robot” check).
+>   If that happens, wait a few minutes and retry, or enable visible browser
+>   mode and solve the challenge manually.
+> - Starting separate MCP server processes starts separate browsers. Avoid
+>   sending excessive searches from several AI tools at the same time.
 
-A stdio Model Context Protocol server that exposes focused browser tools:
+---
 
-- `google_search` — Google search through a JavaScript-rendered Chrome instance.
-- `fetch_url` — JavaScript-rendered readable text extraction for public HTTP(S) URLs.
-- `health_check` — display, browser, queue, and CAPTCHA status.
+## Main features
 
-The server is designed to be configured by any MCP client that can launch a
-stdio command.
+- **Real Chrome execution**: Search and page extraction run in a real Chrome
+  browser, including pages whose content changes through JavaScript.
+- **Readable Markdown shaping**: `trafilatura` and `html2text` remove common
+  headers, footers, advertisements, and other boilerplate before returning
+  readable content.
+- **Language and region hints**: Choose Google language and region values such
+  as `hl: "ja"` and `gl: "jp"`.
+- **Switchable browser display**: Use a normal visible window, an off-screen
+  hidden window, or headless mode for environments without an interactive
+  desktop.
+- **Safe network access**: Only public destinations are allowed; `localhost`
+  and private IP addresses are blocked.
+- **Reliable cleanup**: A Windows Job Object makes Chrome and related processes
+  follow the MCP client when it exits.
 
-## Features
+---
 
-- JS-rendered Google search + public URL fetch through a real (non-headless)
-  Chrome on a private virtual display (Xephyr when visible, Xvfb when hidden)
-  — harder to bot-detect than `--headless`.
-- Shaped markdown by default (`trafilatura` + `html2text`, pure-Python, no
-  extra service), with full-text fallback and follow-up link targets.
-- Language/region hints (`hl`/`gl`) for reproducible JA/EN results.
-- Parallel-safe: concurrent searches and fetches serialize only where the
-  browser lifecycle requires it; each fetch uses its own tab.
-- Fail-closed fetching: private networks, metadata hosts, and
-  credential-bearing URLs are blocked, including post-redirect targets.
-- Shared SQLite pacing for Google searches across MCP processes.
-- `health_check` for display/browser/queue/CAPTCHA observability.
-- Linux only (Xvfb/Xephyr, `fcntl`, process groups).
+## Quickstart
 
-## Requirements
+### Option A: Use `uvx` (recommended)
 
-- Python 3.10 or newer
-- Google Chrome, Google Chrome for Testing, or Chromium
-- `Xephyr` on Linux for the default visible-window mode
-- `Xvfb` on Linux for hidden-window mode
-- `xpra` on Linux if interactive CAPTCHA recovery is desired
+If `uv` is installed, an MCP client can download the published package and
+start it without a manually created virtual environment. The examples pin
+version `0.2.0`; change the version to the release you want to use.
 
-The Python dependencies are installed with the package. Chrome and Xvfb remain
-host prerequisites because they are external browser processes.
+#### Cursor example
 
-Non-headless Chrome on Xvfb is intentional: `--headless` is easier to
-bot-detect, so Xvfb is kept as a requirement even though it is heavier.
-
-## Platform support
-
-Linux only. Windows and macOS are not supported: this server depends on
-`Xvfb`/`Xephyr`, Chromium with `--ozone-platform=x11`, `fcntl.flock`, and
-process-group signaling (`killpg`), none of which work as-is on Windows.
-A Windows/macOS port would need headless Chrome plus a different locking
-scheme. Docker helps only on a Linux host with an X server for `xephyr` mode.
-
-## Headless environments
-
-On a headless server, CI runner, SSH session without X forwarding, or any
-machine without a desktop display, set `show_browser` to `false`:
-
-```json
-{
-  "show_browser": false
-}
-```
-
-Edit `~/.config/chrome-web-mcp/config.json` (or the file specified by
-`CW_CONFIG`) and restart the MCP client. This forces Chrome onto hidden Xvfb
-and avoids the Xephyr startup error caused by the lack of a user `DISPLAY`.
-
-The built-in default is `true` for desktop use, so do not omit this setting on
-a headless machine. A Docker installation already sets
-`CW_DISPLAY_MODE=xvfb` inside the container, so it normally needs no host
-display or extra setting.
-
-## Linux quickstart (Debian/Ubuntu, copy-paste)
-
-```bash
-# 1. System dependencies
-sudo apt update && sudo apt install -y chromium xvfb xserver-xephyr x11-utils python3-venv
-which chromium || which google-chrome || which chromium-browser
-which Xvfb
-python3 --version  # 3.10+
-
-# 2. Create an environment and install the package (either one)
-python3 -m venv .venv
-. .venv/bin/activate
-python3 -m pip install -e '.'
-# or: python -m pip install chrome_web_mcp-0.2.0-py3-none-any.whl
-```
-
-MCP handshake check (`TOOLS: ['fetch_url', 'google_search', 'health_check']` expected):
-
-```bash
-uv run python -c "
-import asyncio
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-async def main():
-    params = StdioServerParameters(command='uv', args=['run','--directory','/absolute/path/to/chrome-web-mcp','chrome-web-mcp'])
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            print('TOOLS:', [t.name for t in (await session.list_tools()).tools])
-asyncio.run(main())
-"
-```
-
-opencode (`~/.config/opencode/opencode.json`, Linux path example):
-
-```json
-{
-  "mcp": {
-    "chrome-web": {
-      "type": "local",
-      "command": ["uv", "run", "--directory", "/home/user/projects/chrome-web-mcp", "chrome-web-mcp"],
-      "enabled": true
-    }
-  }
-}
-```
-
-Notes:
-
-- Replace `/absolute/path/to/chrome-web-mcp` with your checkout path.
-- `CW_CHROME=/usr/bin/chromium` only if auto-detection misses your binary.
-- Concurrent calls within one server are supported. Searches are serialized;
-  fetches use independent tabs and share a serialized browser startup.
-- `xephyr` mode needs a real desktop `DISPLAY` plus `xserver-xephyr`;
-  on a headless host or over SSH without X forwarding it will not start.
-  Default `xvfb` mode needs no `DISPLAY`.
-
-## Install and run
-
-From a built wheel:
-
-```bash
-python -m pip install chrome_web_mcp-0.2.0-py3-none-any.whl
-chrome-web-mcp
-```
-
-For a published package, an MCP client can let `uvx` install it on demand:
+Add this to `%USERPROFILE%\.cursor\mcp.json`, or add it in Cursor's
+Settings -> MCP screen. A copy-ready version is available at
+[`examples/mcp-config.uvx.json`](examples/mcp-config.uvx.json):
 
 ```json
 {
@@ -172,319 +109,515 @@ For a published package, an MCP client can let `uvx` install it on demand:
 }
 ```
 
-For a local checkout:
+#### Claude Desktop example
+
+Add the same server entry to
+`%APPDATA%\Claude\claude_desktop_config.json`. A copy-ready version is
+available at [`examples/mcp-config.uvx.json`](examples/mcp-config.uvx.json):
 
 ```json
 {
   "mcpServers": {
     "chrome-web": {
-      "command": "uv",
-      "args": ["run", "--directory", "/absolute/path/to/chrome-web-mcp", "chrome-web-mcp"]
+      "command": "uvx",
+      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
     }
   }
 }
 ```
 
-The same server can be registered in Hermes with YAML:
+#### VS Code / GitHub Copilot example
 
-```yaml
-mcp_servers:
-  chrome-web:
-    command: /absolute/path/to/python
-    args:
-      - -m
-      - chrome_web_mcp
-    timeout: 120
-    connect_timeout: 60
-    enabled: true
+For a workspace-specific setup, create `.vscode/mcp.json` in the project folder.
+For a user-wide setup, run `MCP: Open User Configuration` from the Command
+Palette. Add or merge this entry. A copy-ready version is available at
+[`examples/mcp-config.vscode.json`](examples/mcp-config.vscode.json).
+
+```json
+{
+  "servers": {
+    "chrome-web": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
+    }
+  }
+}
 ```
 
-For a wheel installation, use the Python interpreter from the environment
-where the wheel was installed. MCP clients should launch the process over
-stdio and must not add shell-specific quoting around the arguments.
+#### Google Antigravity CLI example
 
-## Docker
-
-The image bundles Python, dependencies, Chromium, Xvfb (plus Xephyr/xdotool
-for visible-window mode), so users only need Docker:
-
-```bash
-docker build -t chrome-web-mcp .
-```
+Antigravity CLI is Google's current terminal agent. If you are moving from
+Gemini CLI, use Google's [migration guide](https://antigravity.google/docs/cli/gcli-migration).
+For Antigravity CLI, merge this entry into the global configuration at
+`%USERPROFILE%\.gemini\config\mcp_config.json`. For a project-only setup, put
+the same file at `.agents\mcp_config.json` inside the workspace. The same
+`mcp_config.json` format is used by Antigravity IDE. See Google's
+[Antigravity MCP guide](https://antigravity.google/docs/cli/mcp/) for current
+details. A copy-ready version is available at
+[`examples/mcp-config.antigravity.json`](examples/mcp-config.antigravity.json).
 
 ```json
 {
   "mcpServers": {
     "chrome-web": {
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "chrome-web-mcp"]
+      "command": "uvx",
+      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
     }
   }
 }
 ```
 
-For opencode, add a separate entry to `~/.config/opencode/opencode.json` so
-you can keep the local and Docker versions available side by side:
+#### Windsurf (Cascade) example
 
-```json
-"chrome-web-docker": {
-  "type": "local",
-  "command": ["docker", "run", "--rm", "-i", "chrome-web-mcp:latest"],
-  "enabled": true,
-  "timeout": 120000
-}
-```
-
-The Docker image uses hidden Xvfb by default. This is separate from the local
-`chrome-web` entry, whose `show_browser` setting can display a desktop window.
-Restart opencode after adding or changing the entry.
-
-Hidden mode is normally sufficient. If Google returns
-`captcha_required: true`, the CAPTCHA is displayed inside the Docker
-container's browser, so the local `chrome-web` window cannot solve it. Start
-the Docker MCP server in visible Xephyr mode instead and retry the search:
-
-```bash
-docker run -i --rm \
-  -e DISPLAY=$DISPLAY \
-  -e CW_DISPLAY_MODE=xephyr \
-  -e XAUTHORITY=$XAUTHORITY \
-  -v /tmp/.X11-unix:/tmp/.X11-unix \
-  -v "$XAUTHORITY":"$XAUTHORITY":ro \
-  chrome-web-mcp
-```
-
-This requires a Linux desktop X display and `Xephyr`. On Wayland/Mutter, the
-working Xauthority file may be a `.mutter-Xwaylandauth.*` file under
-`$XDG_RUNTIME_DIR` rather than `$XAUTHORITY`; mount that directory and set
-`XAUTHORITY` to the matching path inside the container. The resulting
-`chrome-web-mcp` window belongs to the Docker process, and you must retry using
-that same Docker MCP session. For the simplest CAPTCHA recovery, use the local
-`chrome-web` entry with `show_browser: true` from the beginning.
-
-Image size is about 1.5 GB (mostly Chromium and fonts).
-
-## Update
-
-For a local checkout, pull and re-sync (restart the MCP client afterwards):
-
-```bash
-git -C /absolute/path/to/chrome-web-mcp fetch origin
-git -C /absolute/path/to/chrome-web-mcp reset --hard origin/main
-```
-
-`reset --hard` is used instead of `pull --ff-only` because history is
-occasionally force-pushed; stash local changes first if you have any
-(`git stash`). `uv run --directory ... chrome-web-mcp` picks up the new
-dependencies automatically on next launch — no reinstall step needed.
-
-For a dedicated venv (e.g. `~/.local/share/chrome-web-mcp/venv`), reinstall
-after pulling:
-
-```bash
-uv pip install --python ~/.local/share/chrome-web-mcp/venv/bin/python -U -e /absolute/path/to/chrome-web-mcp
-```
-
-For a wheel install, rebuild and reinstall:
-
-```bash
-python -m build --wheel --outdir /absolute/path/to/chrome-web-mcp/dist /absolute/path/to/chrome-web-mcp
-python -m pip install -U /absolute/path/to/chrome-web-mcp/dist/chrome_web_mcp-*.whl
-```
-
-For Docker, just rebuild — no `Dockerfile` edit is needed (it copies
-`pyproject.toml` + `src/` and runs `pip install .`, so code and dependency
-changes are picked up automatically):
-
-```bash
-docker build -t chrome-web-mcp /absolute/path/to/chrome-web-mcp
-```
-
-Verify after update:
-
-```bash
-uv pip list --python ~/.local/share/chrome-web-mcp/venv/bin/python | grep -E "chrome-web|trafilatura"
-```
-
-## Install size (rough, Debian host)
-
-- Python environment (`.venv`, incl. trafilatura/html2text): ~100 MB
-- This package source: under 1 MB
-- Chromium set: ~485 MB
-- Xvfb + x11-utils: ~5 MB
-- Total: ~600 MB, dominated by Chromium. No new system packages were added
-  for markdown shaping (pure-Python dependencies only).
-
-## Tools
-
-Workflow: first `google_search`, then `fetch_url` on interesting result URLs
-for full text. `health_check` reports server state without starting a browser.
-
-### `google_search`
-
-Input:
-
-```json
-{"query": "search terms", "limit": 5, "hl": "ja", "gl": "jp"}
-```
-
-`limit` is an integer from 1 to 20. Results are returned as structured JSON
-with `title`, `url`, `description`, and `position` fields, plus `waited_ms`
-(the shared rate-limiter queue wait). `hl`/`gl` are optional Google language
-(`ja`/`en`) and region (`jp`/`us`) hints; defaults preserve Japanese results.
-`query` is required, max 512 chars. Searches run one at a time per process
-and are paced across processes (see Runtime configuration). Bursts of 15+
-searches per minute return a `pace_warning` — slow down or batch queries to
-avoid a Google CAPTCHA; `health_check` reports the recent count.
-
-### `fetch_url`
-
-Input:
-
-```json
-{"url": "https://example.com", "char_limit": 15000, "format": "markdown"}
-```
-
-Only public `http://` and `https://` URLs without embedded credentials are
-accepted. Localhost, private IP ranges, metadata hosts, and non-public DNS
-resolutions are rejected. A mandatory local HTTP proxy validates every upstream
-connection and connects to the validated numeric address, including redirects,
-subresources, WebSockets, and DNS changes. Chrome's loopback proxy bypass, QUIC,
-and non-proxied WebRTC UDP are disabled. IPv6 translation/tunneling addresses
-(NAT64, 6to4, Teredo) are also rejected. `char_limit` is an integer from 100 to
-200000. HTML/text snapshots are read in chunks, with a 16Mi-character extraction
-limit independent of the returned text limit. Text is cut at a
-sentence boundary when possible. Returns `requested_url`, `final_url`,
-`redirected`, `total_chars`, and `truncated` alongside `title` and content
-(`url` mirrors `final_url` for compatibility). `format` defaults to
-`markdown`: shaped readable markdown with boilerplate removed
-(`trafilatura`, `html2text` fallback). The response reports `formatted: true`
-and the `extraction` method, so agents can tell it was shaped — if content
-looks missing, retry with `format: "text"` for the full rendered text.
-`format: "links"` adds follow-up link targets. Concurrent fetches are
-parallel-safe; each uses its own tab. `url` is required, max 2048 chars.
-Failures return `{"success": false, "error": "..."}` (plus
-`"captcha_required": true` for Google challenges). This shaping reuses the same
-`trafilatura` + `html2text` approach as a self-hosted jina-compatible Reader,
-without needing the extra service.
-
-### `health_check`
-
-Input: `{}` (no arguments).
-
-Returns `display_mode`, browser/process liveness, the rate-limiter queue wait,
-its `min`/`max` delays, and the last CAPTCHA time.
-
-## Runtime configuration
-
-Most users only need the JSON file:
-
-```bash
-mkdir -p ~/.config/chrome-web-mcp
-cp examples/config.json examples/config.md ~/.config/chrome-web-mcp/
-```
-
-Then edit `~/.config/chrome-web-mcp/config.json` and restart the MCP client.
-The settings most people change are:
+Merge this entry into
+`%USERPROFILE%\.codeium\windsurf\mcp_config.json`. You can also open the
+file from Windsurf Settings -> Cascade -> MCP Servers -> View Raw Config. A
+copy-ready version is available at
+[`examples/mcp-config.windsurf.json`](examples/mcp-config.windsurf.json).
 
 ```json
 {
-  "show_browser": true,
+  "mcpServers": {
+    "chrome-web": {
+      "command": "uvx",
+      "args": ["--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
+    }
+  }
+}
+```
+
+#### OpenCode example
+
+Add this server to `opencode.jsonc` in your workspace (or merge it into your
+existing OpenCode configuration). A copy-ready version is available at
+[`examples/mcp-config.opencode.jsonc`](examples/mcp-config.opencode.jsonc):
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "chrome-web": {
+        "type": "local",
+        "command": ["uvx", "--from", "chrome-web-mcp==0.2.0", "chrome-web-mcp"]
+      }
+    }
+  }
+}
+```
+
+All examples above use the published package. They require `uv` to be
+available on `PATH`. If you use a local checkout instead, replace the `uvx`
+command with the executable from your virtual environment:
+
+- `mcpServers` clients (Cursor, Claude Desktop, Antigravity CLI, and Windsurf): use
+  `C:\\Users\\YOU\\chrome-web-mcp\\.venv\\Scripts\\chrome-web-mcp.exe` as
+  `command` and remove the `args` entry.
+- VS Code: use the same executable as `command`, keep `type: "stdio"`, and set
+  `args` to `[]`.
+- OpenCode: use an array containing the executable path, for example
+  `["C:\\Users\\YOU\\chrome-web-mcp\\.venv\\Scripts\\chrome-web-mcp.exe"]`.
+
+---
+
+### Option B: Set up a local checkout
+
+Use these steps when you want to run the source code from a GitHub checkout.
+
+1. Create a virtual environment and install the package from Command Prompt or
+   PowerShell:
+
+```bat
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install -e ".[test]"
+```
+
+2. If Google Chrome is not already installed, place a project-local Chrome for
+   Testing build:
+
+```bat
+python scripts\install-chrome-for-testing.py
+```
+
+   This step is not needed when a supported Chrome installation is already
+   available.
+
+3. Add the executable path to the MCP client configuration. Replace `YOU` with
+   your Windows user name and adjust the checkout path if needed:
+
+```json
+{
+  "mcpServers": {
+    "chrome-web": {
+      "command": "C:\\Users\\YOU\\chrome-web-mcp\\.venv\\Scripts\\chrome-web-mcp.exe"
+    }
+  }
+}
+```
+
+#### Codex example
+
+For Codex Desktop or Codex CLI, add the following to
+`%USERPROFILE%\.codex\config.toml`. Replace `YOU` with your Windows user name.
+
+```toml
+[mcp_servers.chrome-web]
+command = 'C:\Users\YOU\chrome-web-mcp\.venv\Scripts\chrome-web-mcp.exe'
+args = []
+cwd = 'C:\Users\YOU\chrome-web-mcp'
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+enabled = true
+
+[mcp_servers.chrome-web.env]
+# Change this to "headless" when no interactive desktop is available.
+CW_DISPLAY_MODE = "hidden"
+```
+
+Save the file and restart the MCP client.
+
+---
+
+## Tool details and specifications
+
+### 1. `google_search`
+
+Runs a Google search and returns structured results.
+
+#### Input parameters
+
+```json
+{
+  "query": "search keywords",
+  "limit": 5,
   "hl": "ja",
   "gl": "jp"
 }
 ```
 
-- `show_browser`: `true` shows the browser window; `false` hides it.
-- `hl`: Google interface language. `ja` is Japanese and `en` is English.
-- `gl`: Google result region. `jp` is Japan and `us` is the United States.
+- `query` (required): Search text, up to 512 characters.
+- `limit` (optional): Number of results, from 1 to 20. The default is 5.
+- `hl` (optional): Google display-language code, 2 to 8 characters.
+- `gl` (optional): Search-region code, 2 to 8 characters.
 
-The built-in search defaults are `hl: ja` and `gl: jp`, but each user can set
-their own values in this file. For example, use `"hl": "en"` and
-`"gl": "us"` for English/US-oriented Google results. See
-[`examples/config.md`](examples/config.md) for all settings and examples.
+#### Successful response example
 
-The JSON file is optional. If it is absent, the built-in defaults are used and
-the browser window is shown (`show_browser: true`). Set it to `false` to hide
-the window. JSON comments are not supported, so keep `config.json` as plain
-JSON.
+```json
+{
+  "success": true,
+  "data": {
+    "web": [
+      {
+        "title": "Page title",
+        "url": "https://example.com/page",
+        "description": "Search-result description",
+        "position": 1
+      }
+    ],
+    "waited_ms": 1240,
+    "pace_warning": null
+  }
+}
+```
 
-Optional environment variables:
+The result list is in `data.web`. `waited_ms` is the time spent waiting for a
+search slot, in milliseconds. `pace_warning` is normally `null`; when searches
+are concentrated in a short period, it contains a warning message.
 
-- `CW_CONFIG` — path to an optional JSON config file for window on/off and
-  tool defaults. When unset, `~/.config/chrome-web-mcp/config.json` is used
-  if it exists. Explicit environment variables below win over the file.
-  Settings become tool defaults when the caller omits them. Unknown keys warn
-  on stderr; invalid values warn and keep the built-in default per key.
-- `CW_CHROME` — explicit Chrome/Chromium executable path.
-- `CW_PROFILE_DIR` — explicit browser profile directory. By default, each
-  server process uses an isolated per-PID temporary profile.
-- `CW_LOCK_PATH` — explicit lock-file path when `CW_PROFILE_DIR` is set.
-- `CW_RATE_LIMIT_DB` — shared SQLite path for the Google-search start-slot
-  queue. By default it is `/tmp/chrome-web-mcp/search-rate-limit.sqlite3`, so
-  separate MCP processes of the same user share one limiter.
-- `CW_MIN_DELAY` / `CW_MAX_DELAY` — randomized gap (seconds) between Google
-  search starts. Defaults `1.0` / `2.5`.
-- `CW_DISPLAY_MODE` — advanced environment override for `show_browser`:
-  `xvfb` runs Chrome on a private, fully hidden display, while `xephyr` runs
-  Chrome inside a nested `Xephyr` window titled `chrome-web-mcp` on your
-  desktop. The latter is visible, minimizable, and movable, but tool calls can
-  never pop a window to the front outside of it. Requires `Xephyr`
-  (`xserver-xephyr`) and a user `DISPLAY`.
-- When `CW_DISPLAY_MODE=xephyr`, the server preserves an explicit `XAUTHORITY`
-  or automatically discovers Mutter's `.mutter-Xwaylandauth.*` file under
-  `XDG_RUNTIME_DIR`, then falls back to `~/.Xauthority`. This lets stdio MCP
-  clients that filter their inherited environment still connect to the user's
-  Xwayland display.
-- `CW_XPRA_EXPOSE` — set to `1` to re-enable automatic Xpra attach when a
-  CAPTCHA appears. Off by default: automatic attach once crashed the desktop
-  session, so the server only reports the CAPTCHA and leaves the browser
-  where it is.
+---
 
-The default per-process profile prevents separate MCP clients from contending
-for one Chrome profile. Do not share a profile between live server processes
-unless that is intentional.
+### 2. `fetch_url`
 
-Google-search calls also reserve a slot in the shared SQLite queue. Separate
-MCP processes therefore start searches one at a time with a 1.0–2.5 second
-randomized gap. A reserved slot is not retried automatically if Google returns
-an error; the tool returns the error to the MCP client. `fetch_url` is not put
-through this Google-search queue.
+Reads a public web page and returns its content in the requested format.
 
-## Security and scope
+#### Input parameters
 
-- The server exposes no arbitrary page-context JavaScript tool.
-- Browser HTTP(S)/WebSocket connections are restricted to public addresses by
-  a local validating proxy; private destinations are rejected before connecting.
-  Input URLs also reject embedded credentials and recognizable secret patterns.
-  This does not classify every possible secret in arbitrary page URLs/content.
-- Each server owns and cleans up its Chrome and Xvfb process groups.
-- Chrome is explicitly forced onto the private X11/Xvfb display, even when the
-  host desktop session uses Wayland; the user desktop should not be surfaced.
-- SIGTERM and SIGINT trigger browser and temporary-profile cleanup before exit.
-  Startup recovers recorded Chrome/display processes using PID and start time,
-  not broad process-name matching. Legacy profiles without process records can
-  recover Chrome by exact profile argument; their Xvfb cannot be safely identified.
-- Google result URLs are normalized and deduplicated before returning.
+```json
+{
+  "url": "https://example.com",
+  "char_limit": 15000,
+  "format": "markdown"
+}
+```
 
-This package does not bypass authentication or CAPTCHA challenges. It is a
-browser-backed search/fetch MCP server, not a general remote browser-control
-API.
+- `url` (required): An `http://` or `https://` URL, up to 2048 characters.
+- `char_limit` (optional): Maximum returned text length, from 100 to 200000
+  characters. The default is 15000.
+- `format` (optional): Output format. The default is `"markdown"`.
+  - `"markdown"`: Readable Markdown with common boilerplate removed. The body
+    is in `data.markdown`, and `data.links` contains up to 200 page links.
+  - `"text"`: Full rendered page text in `data.text`. No `links` array is
+    returned. Use this when Markdown extraction looks incomplete.
+  - `"links"`: Plain-text body in `data.text` plus up to 200 page links in
+    `data.links`.
 
-When Google presents a CAPTCHA during `google_search`, the server returns
-`captcha_required: true`. With `show_browser: true` (Xephyr), solve the
-challenge in the `chrome-web-mcp` window on your desktop, then retry the same
-search. With `show_browser: false` (Xvfb), wait a while and retry. Automatic
-Xpra attach is disabled unless `CW_XPRA_EXPOSE=1` is set, because it once
-crashed the desktop session.
+#### Successful response example (`format: "markdown"`)
 
-## Acknowledgements
+```json
+{
+  "success": true,
+  "data": {
+    "requested_url": "https://example.com",
+    "final_url": "https://example.com/page",
+    "redirected": true,
+    "title": "Page title",
+    "total_chars": 8500,
+    "truncated": false,
+    "format": "markdown",
+    "formatted": true,
+    "extraction": "trafilatura",
+    "markdown": "# Article heading\n\nArticle text...",
+    "links": [
+      {"text": "Related page", "url": "https://example.com/subpage"}
+    ]
+  }
+}
+```
 
-Browser-backed web tooling was originally derived from
-[antirez/ds4](https://github.com/antirez/ds4) and subsequently substantially
-reworked for MCP. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the
-applicable MIT license notice.
+Only public destinations can be fetched. `localhost`, private IP addresses,
+cloud metadata hosts, credential-bearing URLs, and similar destinations are
+rejected. The response includes the final URL, redirect status, total length,
+truncation status, and extraction method.
 
-## Development
+---
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, test (`pytest -q -m 'not live'` for deterministic only), and build steps.
+### 3. `health_check`
+
+Takes no arguments. Passing arguments returns an error.
+
+#### Successful response example
+
+```json
+{
+  "success": true,
+  "data": {
+    "platform": "Windows 10 (AMD64)",
+    "display_mode": "native",
+    "chrome_binary": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "chrome_version": "Google Chrome 150.0.0.0",
+    "chrome_detection_error": null,
+    "chrome_alive": true,
+    "windows_job_attached": true,
+    "gpu_device": null,
+    "gpu_renderer": null,
+    "gpu_backend": "UNKNOWN",
+    "rate_limiter_queue_wait_s": 0.0,
+    "rate_limit_min_delay_s": 1.0,
+    "rate_limit_max_delay_s": 2.5,
+    "recent_searches_60s": 2,
+    "pace_warning": null,
+    "last_captcha_at": null
+  }
+}
+```
+
+This reports browser liveness, Chrome version, Job Object attachment, recent
+search count, and other runtime information. Calling it does not start Chrome.
+
+---
+
+## Configuration and customization
+
+### Creating the configuration file
+
+Place a `config.json` file to change the built-in defaults. Run the following
+commands in PowerShell to copy the example configuration and its explanation:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:APPDATA\chrome-web-mcp"
+Copy-Item examples\config.json, examples\config.md "$env:APPDATA\chrome-web-mcp\"
+```
+
+The default path is `%APPDATA%\chrome-web-mcp\config.json`. To use another
+file, set `CW_CONFIG` to its path.
+
+```json
+{
+  "show_browser": true,
+  "hl": "ja",
+  "gl": "jp",
+  "limit": 5,
+  "char_limit": 15000,
+  "format": "markdown",
+  "min_delay": 1.0,
+  "max_delay": 2.5
+}
+```
+
+The main settings are:
+
+- `show_browser`: `true` opens a normal visible Chrome window. `false` moves
+  the window off-screen. Use `CW_DISPLAY_MODE=headless` when there is no
+  interactive desktop.
+- `hl` / `gl`: Google display language and search region. Use `ja` / `jp` for
+  Japanese and Japan-oriented results.
+- `limit`: Default number of `google_search` results, from 1 to 20.
+- `char_limit`: Default maximum `fetch_url` text length, from 100 to 200000.
+- `format`: Default `fetch_url` format: `markdown`, `text`, or `links`.
+- `min_delay` / `max_delay`: Search-start interval in seconds, randomized within
+  the configured range.
+
+### Running in a service or background environment
+
+For Task Scheduler, CI, automation, or another environment without a desktop,
+explicitly select headless mode with an environment variable:
+
+```bat
+set CW_DISPLAY_MODE=headless
+chrome-web-mcp
+```
+
+`CW_DISPLAY_MODE` takes priority over `show_browser` and accepts `native`,
+`hidden`, or `headless`.
+
+### Main environment variables
+
+| Environment variable | Purpose | Default |
+| :--- | :--- | :--- |
+| `CW_CONFIG` | Path to the JSON configuration file | `%APPDATA%\chrome-web-mcp\config.json` |
+| `CW_DISPLAY_MODE` | `native`, `hidden`, or `headless`; takes priority over `show_browser` | Not set |
+| `CW_CHROME` | Path to the Chrome executable | Automatic discovery |
+| `CW_PROFILE_DIR` | Chrome profile directory | `%TEMP%\chrome-web-v2-profile\{process ID}` |
+| `CW_LOCK_PATH` | Profile lock-file path | `.instance.lock` inside the profile |
+| `CW_RATE_LIMIT_DB` | SQLite path used for search pacing | `%TEMP%\chrome-web-mcp\search-rate-limit.sqlite3` |
+| `CW_MIN_DELAY` / `CW_MAX_DELAY` | Search-start interval in seconds | `1.0` / `2.5` |
+
+Unknown configuration keys and invalid values produce a warning on standard
+error and keep the relevant built-in default. Restart the MCP client after
+changing configuration.
+
+---
+
+## CAPTCHA handling
+
+This server does not automatically bypass Google image verification or password
+authentication.
+
+When repeated searches cause Google to request verification, the tool returns an
+error like this:
+
+```json
+{
+  "success": false,
+  "error": "...",
+  "captcha_required": true
+}
+```
+
+- **Visible browser (`show_browser: true`)**: Operate the open Chrome window,
+  complete the challenge yourself, and run the same search again.
+- **Hidden browser (`show_browser: false`)**: The hidden challenge cannot be
+  completed from the tool. Wait a few minutes and retry, or switch to
+  `show_browser: true` and restart.
+
+---
+
+## Safety and security design
+
+- **Local-destination blocking**: `localhost` and private IP addresses are
+  blocked; only public web pages can be fetched.
+- **Credential-bearing URL rejection**: URLs containing passwords or recognizable
+  secret patterns are rejected.
+- **Automatic process cleanup**: Chrome is assigned to a Windows Job Object and
+  related processes are cleaned up when the MCP client exits. Startup stops if
+  the assignment cannot be made safely.
+- **Profile isolation**: Chrome runs with a per-process temporary profile,
+  separate from your normal browsing history and saved passwords.
+- **Orphan recovery**: After an abnormal exit, recorded Chrome processes are
+  recovered by checking their process ID and start time. Unrelated Chrome
+  processes are not terminated by name alone.
+
+This server does not bypass authentication or CAPTCHA challenges. It is not a
+general remote browser-control API and does not expose arbitrary page-context
+JavaScript execution.
+
+---
+
+## Environment and storage requirements
+
+- **Supported OS**: Windows 10 or Windows 11 (64-bit)
+- **Python**: 3.10 or newer
+- **Browser**: Google Chrome, Google Chrome for Testing, or Chromium
+- **Approximate disk usage**:
+  - Python virtual environment, including dependencies: about 100 MB
+  - Package source: less than 1 MB
+  - Chrome for Testing, when installed locally: about 485 MB
+  - Total: about 600 MB
+
+If Google Chrome is already installed, the Chrome for Testing space is not
+needed. Actual size varies with the Python version and Chrome release.
+
+---
+
+## Updating
+
+### Updating a local checkout
+
+Review local changes before updating. Do not use `reset --hard`, because it can
+discard work.
+
+```powershell
+git -C "C:\Users\YOU\chrome-web-mcp" fetch origin
+git -C "C:\Users\YOU\chrome-web-mcp" pull --ff-only
+& "C:\Users\YOU\chrome-web-mcp\.venv\Scripts\python.exe" -m pip install -e "C:\Users\YOU\chrome-web-mcp[test]"
+```
+
+Restart the MCP client after updating. If you start the server with `uv run`,
+dependencies are synchronized on the next launch.
+
+---
+
+## Development and testing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and build
+instructions.
+
+To run tests that do not contact external services and should produce the same
+results each time:
+
+```bat
+pytest -q -m "not live"
+```
+
+Tests marked `live` contact Google and can be affected by network conditions or
+CAPTCHA challenges.
+
+---
+
+## Origins and acknowledgements
+
+This repository is an independent Windows-focused fork of
+[kuraneko1/chrome-web-mcp](https://github.com/kuraneko1/chrome-web-mcp). It began
+with browser-backed web processing from
+[antirez/ds4](https://github.com/antirez/ds4). The upstream license notice
+credits `The ds4.c authors` and `The ggml authors`; that notice is preserved in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+The Git history records the following authors and stages of development:
+
+- `kuraneko1`: Established the initial `chrome-web-mcp` structure and browser
+  runtime.
+- `ryu`: Expanded the MCP search and page-fetch features, Markdown shaping,
+  configuration, and documentation.
+- `_ryu15_`: Clarified the platform support boundary and added the DS4 license
+  notice.
+
+The current Windows edition is a full redesign and reimplementation for Python
+and MCP. It is not a simple redistribution of the original code. It adds and
+reworks search, public-URL fetching, readable content extraction, safe
+connection checks, rate limiting, and Windows Chrome startup and cleanup.
+We thank the earlier contributors and the ds4.c and ggml contributors for the
+foundation and ideas behind this work.
+
+---
+
+## License
+
+This project is released under the MIT License. See [LICENSE](LICENSE) for the
+full text. The DS4-derived notice is kept separately in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+For security reports, see [SECURITY.md](SECURITY.md). Do not include real
+passwords, cookies, or other secrets in public issues.

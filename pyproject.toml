@@ -8,13 +8,30 @@ version = "0.2.0"
 description = "Safe JavaScript-rendered Google search and public URL fetch MCP server"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "kuraneko1" }]
+keywords = ["chrome", "mcp", "browser", "web", "google-search"]
+classifiers = [
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Internet :: WWW/HTTP",
+]
 dependencies = [
   "mcp==1.28.0",
   "httpx==0.28.1",
   "websockets==16.0",
   "trafilatura>=2.2.0",
   "html2text>=2025.4.15",
+  "psutil>=7,<8",
 ]
+
+[project.urls]
+Homepage = "https://github.com/kotao-boop/chrome-web-mcp-windows"
+Repository = "https://github.com/kotao-boop/chrome-web-mcp-windows"
+Issues = "https://github.com/kotao-boop/chrome-web-mcp-windows/issues"
+Changelog = "https://github.com/kotao-boop/chrome-web-mcp-windows/releases"
 
 [project.scripts]
 chrome-web-mcp = "chrome_web_mcp.server:run"
@@ -25,6 +42,7 @@ packages = ["src/chrome_web_mcp"]
 [project.optional-dependencies]
 test = [
   "pytest>=8,<10",
+  "build>=1,<2",
 ]
 
 [tool.pytest.ini_options]

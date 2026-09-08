@@ -11,6 +11,7 @@ import ipaddress
 import select
 import socket
 import socketserver
+import sys
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
@@ -46,7 +47,7 @@ def public_addresses(host: str, port: int) -> list[tuple]:
         answers = socket.getaddrinfo(normalized, port, type=socket.SOCK_STREAM)
     except OSError as exc:
         raise ValueError("Blocked: hostname could not be resolved safely") from exc
-    if not answers or any(not _public_address(item[4][0]) for item in answers):
+    if not answers or any(not _public_address(str(item[4][0])) for item in answers):
         raise ValueError("Blocked: URL resolves to a non-public address")
     return answers
 
@@ -77,6 +78,13 @@ class _ProxyServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.stopping = threading.Event()
         super().__init__(("127.0.0.1", 0), _ProxyHandler)
 
+    def handle_error(self, request, client_address):
+        """Do not print normal browser/socket shutdown races to stderr."""
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
+
 
 class _ProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -90,7 +98,7 @@ class _ProxyHandler(BaseHTTPRequestHandler):
 
     def _relay(self, upstream: socket.socket) -> None:
         peers = (self.connection, upstream)
-        while not self.server.stopping.is_set():
+        while not getattr(self.server, "stopping").is_set():
             ready, _, _ = select.select(peers, [], [], 0.25)
             for source in ready:
                 data = source.recv(65536)

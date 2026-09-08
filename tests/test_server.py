@@ -15,6 +15,7 @@ _SANDBOX = tempfile.mkdtemp(prefix="cw-v2-test-")
 os.environ["CW_PROFILE_DIR"] = os.path.join(_SANDBOX, "profile")
 os.environ["CW_LOCK_PATH"] = os.path.join(_SANDBOX, ".instance.lock")
 os.environ["CW_RATE_LIMIT_DB"] = os.path.join(_SANDBOX, "rate-limit.sqlite3")
+SYNTHETIC_SECRET = "sk-" + ("a" * 26)
 
 from chrome_web_mcp import server
 
@@ -34,17 +35,6 @@ def run_async(awaitable):
 def test_exposes_google_search_and_fetch_url_tool_names():
     tools = run_async(_list_tools())
     assert sorted(tool.name for tool in tools) == ["fetch_url", "google_search", "health_check"]
-
-
-def test_browser_environment_cannot_fall_back_to_user_wayland_session(monkeypatch):
-    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
-    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
-
-    env = server.BrowserRuntime._browser_environment(":77")
-
-    assert env["DISPLAY"] == ":77"
-    assert env["XDG_SESSION_TYPE"] == "x11"
-    assert "WAYLAND_DISPLAY" not in env
 
 
 def test_shared_rate_limiter_reserves_slots_across_processes(tmp_path):
@@ -70,42 +60,6 @@ def test_google_challenge_is_detected_from_url_or_rendered_text():
     assert not server._is_google_challenge("https://www.google.com/search?q=x", "Normal search results")
 
 
-def test_human_display_environment_uses_real_x11_display(monkeypatch):
-    monkeypatch.setenv("DISPLAY", ":0")
-    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
-    monkeypatch.setenv("XDG_SESSION_TYPE", "wayland")
-
-    env = server.BrowserRuntime()._human_display_environment()
-
-    assert env["DISPLAY"] == ":0"
-    assert env["XDG_SESSION_TYPE"] == "x11"
-    assert "WAYLAND_DISPLAY" not in env
-
-
-def test_human_display_environment_discovers_mutter_xauthority(tmp_path, monkeypatch):
-    xauth = tmp_path / ".mutter-Xwaylandauth.test"
-    xauth.write_bytes(b"cookie")
-    monkeypatch.delenv("XAUTHORITY", raising=False)
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-
-    env = server.BrowserRuntime()._human_display_environment()
-
-    assert env["XAUTHORITY"] == str(xauth)
-
-
-def test_human_display_environment_prefers_explicit_xauthority(tmp_path, monkeypatch):
-    explicit = tmp_path / "explicit-xauth"
-    explicit.write_bytes(b"cookie")
-    discovered = tmp_path / ".mutter-Xwaylandauth.test"
-    discovered.write_bytes(b"cookie")
-    monkeypatch.setenv("XAUTHORITY", str(explicit))
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-
-    env = server.BrowserRuntime()._human_display_environment()
-
-    assert env["XAUTHORITY"] == str(explicit)
-
-
 def test_captcha_error_is_marked_for_the_mcp_client(monkeypatch):
     async def fake_search(query, limit, hl="ja", gl="jp"):
         raise server.CaptchaRequired("Google CAPTCHA detected")
@@ -115,33 +69,6 @@ def test_captcha_error_is_marked_for_the_mcp_client(monkeypatch):
     payload = json.loads(content[0].text)
 
     assert payload == {"success": False, "error": "Google CAPTCHA detected", "captcha_required": True}
-
-
-def test_expose_for_human_starts_shadow_and_attach(monkeypatch):
-    calls = []
-
-    class FakeProcess:
-        pid = 12345
-
-        def poll(self):
-            return None
-
-    monkeypatch.setattr(server.shutil, "which", lambda name: "/usr/bin/xpra")
-    monkeypatch.setattr(server.subprocess, "Popen", lambda command, **kwargs: calls.append((command, kwargs)) or FakeProcess())
-    monkeypatch.setattr(
-        server.subprocess,
-        "run",
-        lambda command, **kwargs: type("Result", (), {"stdout": "LIVE session at :77"})(),
-    )
-    runtime = server.BrowserRuntime()
-    runtime.display = ":77"
-    runtime.user_display = ":0"
-
-    runtime.expose_for_human()
-
-    assert calls[0][0][:3] == ["/usr/bin/xpra", "shadow", ":77"]
-    assert calls[1][0][:3] == ["/usr/bin/xpra", "attach", ":77"]
-    assert calls[1][1]["env"]["DISPLAY"] == ":0"
 
 
 def test_call_tool_fetch_url_validates_and_delegates(monkeypatch):
@@ -186,7 +113,7 @@ def test_normalizes_direct_and_legacy_google_result_links():
         "http://127.0.0.1/private",
         "http://10.0.0.1/private",
         "http://169.254.169.254/latest/meta-data",
-        "https://example.com/?token=sk-abcdefghijklmnopqrstuvwxyz",
+        f"https://example.com/?token={SYNTHETIC_SECRET}",
         "file:///etc/passwd",
     ],
 )
@@ -313,39 +240,6 @@ def test_fetch_page_runs_concurrent_calls_on_separate_tabs(monkeypatch):
     assert in_section["max"] == 2
 
 
-def test_display_mode_defaults_to_xephyr(monkeypatch):
-    monkeypatch.delenv("CW_DISPLAY_MODE", raising=False)
-    monkeypatch.setattr(server, "CONFIG", dict(server._CONFIG_DEFAULTS))
-    assert server.BrowserRuntime().display_mode == "xephyr"
-
-
-def test_show_browser_false_selects_xvfb(monkeypatch):
-    monkeypatch.delenv("CW_DISPLAY_MODE", raising=False)
-    config = dict(server._CONFIG_DEFAULTS)
-    config["show_browser"] = False
-    monkeypatch.setattr(server, "CONFIG", config)
-    assert server.BrowserRuntime().display_mode == "xvfb"
-
-
-def test_xephyr_mode_requires_user_display(monkeypatch):
-    monkeypatch.setenv("CW_DISPLAY_MODE", "xephyr")
-    runtime = server.BrowserRuntime()
-    runtime.user_display = None
-    try:
-        runtime.ensure()
-    except RuntimeError as exc:
-        assert "xephyr" in str(exc).lower()
-    else:
-        raise AssertionError("xephyr without DISPLAY should fail")
-
-
-def test_xpra_expose_is_opt_in(monkeypatch):
-    monkeypatch.delenv("CW_XPRA_EXPOSE", raising=False)
-    assert server._xpra_expose_enabled() is False
-    monkeypatch.setenv("CW_XPRA_EXPOSE", "1")
-    assert server._xpra_expose_enabled() is True
-
-
 @pytest.mark.live
 def test_live_google_search_returns_real_external_results():
     try:
@@ -402,12 +296,13 @@ def test_call_tool_fetch_url_rejects_bad_format():
 def test_health_check_reports_status(monkeypatch):
     monkeypatch.setattr(server, "_LAST_CAPTCHA_TS", None)
     monkeypatch.setattr(server, "CONFIG", dict(server._CONFIG_DEFAULTS))
-    monkeypatch.setattr(server._RUNTIME, "display_mode", "xvfb")
+    monkeypatch.setattr(server._RUNTIME, "display_mode", "hidden")
     payload = json.loads(run_async(_call_tool("health_check", {}))[0].text)
     assert payload["success"] is True
     data = payload["data"]
-    assert data["display_mode"] == "xvfb"
+    assert data["display_mode"] == "hidden"
     assert isinstance(data["chrome_alive"], bool)
+    assert data["windows_job_attached"] is False
     assert data["last_captcha_at"] is None
     assert data["rate_limit_min_delay_s"] == 1.0
     assert data["rate_limit_max_delay_s"] == 2.5

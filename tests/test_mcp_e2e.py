@@ -110,15 +110,20 @@ def find_orphans():
     """Remote-debugging Chrome processes still alive under the test's sandbox profile.
 
     Matches --user-data-dir pointing at the test sandbox profile, so a
-    concurrently-running live chrome-web-v2 server (default profile) is not
+    concurrently-running live chrome-web-mcp server (default profile) is not
     counted.
     """
+    import psutil
+
     profile = str(SANDBOX / "profile")
-    r = subprocess.run(["ps", "-eo", "pid,args"], capture_output=True, text=True)
     out = []
-    for line in r.stdout.splitlines():
-        if f"--user-data-dir={profile}" in line and "remote-debugging" in line:
-            out.append(line)
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmdline = proc.info.get("cmdline") or []
+        except (psutil.Error, TypeError):
+            continue
+        if f"--user-data-dir={profile}" in cmdline and any("remote-debugging" in part for part in cmdline):
+            out.append(" ".join(cmdline))
     return out
 
 
@@ -139,7 +144,8 @@ def test_sigterm_idle_exits_fast(client):
     code = c.proc.wait(timeout=10)
     dt = time.monotonic() - t0
     c.proc.stderr.read()
-    assert code == 0
+    # Windows TerminateProcess reports 1; POSIX SIGTERM handler exits 0.
+    assert code in ((0, 1) if sys.platform == "win32" else (0,))
     assert dt < 5, f"idle SIGTERM took {dt:.1f}s"
     assert find_orphans() == []
 
@@ -175,7 +181,7 @@ def test_sigterm_with_browser_exits_fast_and_no_orphans(client):
     code = c.proc.wait(timeout=25)
     dt = time.monotonic() - t0
     err = c.proc.stderr.read()[:400]
-    assert code == 0, f"exit={code} stderr={err}"
+    assert code in ((0, 1) if sys.platform == "win32" else (0,)), f"exit={code} stderr={err}"
     assert dt < 15, f"browser SIGTERM took {dt:.1f}s"
     time.sleep(1)
     assert find_orphans() == []
